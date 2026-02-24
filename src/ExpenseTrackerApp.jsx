@@ -1,14 +1,68 @@
 import React, { useState, useEffect } from 'react';
 import {
   Plus, Trash2, TrendingUp, Calendar, DollarSign,
-  PieChart, Edit2, X, Wallet, AlertCircle,
+  PieChart, Edit2, X, Wallet, AlertCircle, RefreshCw, Power,
 } from 'lucide-react';
 import { supabase } from './supabase';
 
+// ─── UTILIDADES DE FECHA COLOMBIA (UTC-5) ────────────────────────────────────
+// Devuelve "YYYY-MM-DD" en hora Colombia sin importar la zona del navegador
+const todayCol = () => {
+  const now = new Date();
+  // Colombia es UTC-5
+  const col = new Date(now.getTime() - 5 * 60 * 60 * 1000);
+  return col.toISOString().split('T')[0];
+};
+
+// Convierte "YYYY-MM-DD" a objeto Date interpretado como medianoche Colombia
+const parseColDate = (str) => {
+  if (!str) return null;
+  const [y, m, d] = str.split('-').map(Number);
+  // Creamos la fecha como UTC para evitar desfases del navegador
+  return new Date(Date.UTC(y, m - 1, d));
+};
+
+// Días restantes desde hoy Colombia hasta fecha "YYYY-MM-DD"
+const daysRemainingCol = (dateStr) => {
+  if (!dateStr) return 0;
+  const today = parseColDate(todayCol());
+  const target = parseColDate(dateStr);
+  return Math.ceil((target - today) / (1000 * 60 * 60 * 24));
+};
+
+// Formatea "YYYY-MM-DD" a texto legible en Colombia
+const formatDateCol = (str) => {
+  if (!str) return '';
+  const d = parseColDate(str);
+  return d.toLocaleDateString('es-CO', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' });
+};
+
+// Nombre del mes en español a partir de "YYYY-MM-DD"
+const monthNameFromDate = (str) => {
+  if (!str) return '';
+  const d = parseColDate(str);
+  return d.toLocaleString('es', { timeZone: 'UTC', month: 'long' });
+};
+
+// Año a partir de "YYYY-MM-DD"
+const yearFromDate = (str) => {
+  if (!str) return new Date().getFullYear();
+  return parseInt(str.split('-')[0]);
+};
+
+// Próxima renovación sumando días según frecuencia
+const nextRenewal = (dateStr, frequency) => {
+  const d = parseColDate(dateStr);
+  if (frequency === 'quincenal') d.setUTCDate(d.getUTCDate() + 15);
+  else d.setUTCMonth(d.getUTCMonth() + 1);
+  return d.toISOString().split('T')[0];
+};
+// ─────────────────────────────────────────────────────────────────────────────
+
 const ExpenseTrackerApp = () => {
-  const [currentUser, setCurrentUser] = useState(null); // { id, username }
+  const [currentUser, setCurrentUser] = useState(null);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [loginMode, setLoginMode] = useState('login'); // 'login' | 'register'
+  const [loginMode, setLoginMode] = useState('login');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [registerForm, setRegisterForm] = useState({ username: '', password: '', confirm: '' });
   const [authError, setAuthError] = useState('');
@@ -29,13 +83,13 @@ const ExpenseTrackerApp = () => {
   });
   const [newGeneral, setNewGeneral] = useState({
     descripcion: '', precio: '',
-    mes: new Date().toLocaleString('es', { month: 'long' }),
-    fecha: new Date().toISOString().split('T')[0],
-    año: new Date().getFullYear(),
+    mes: monthNameFromDate(todayCol()),
+    fecha: todayCol(),
+    año: yearFromDate(todayCol()),
   });
   const [salary, setSalary] = useState({
     monto: '', frecuencia: 'mensual',
-    fechaPago: new Date().toISOString().split('T')[0],
+    fechaPago: todayCol(),
   });
 
   const [filterMonth, setFilterMonth] = useState('todos');
@@ -51,75 +105,44 @@ const ExpenseTrackerApp = () => {
   const handleLogin = async () => {
     setAuthError('');
     if (!loginForm.username.trim() || !loginForm.password.trim()) {
-      setAuthError('Completa todos los campos');
-      return;
+      setAuthError('Completa todos los campos'); return;
     }
     setAuthLoading(true);
     const { data, error } = await supabase
-      .from('usuarios')
-      .select('id, username')
+      .from('usuarios').select('id, username')
       .eq('username', loginForm.username.trim())
-      .eq('password', loginForm.password)
-      .single();
+      .eq('password', loginForm.password).single();
     setAuthLoading(false);
-    if (error || !data) {
-      setAuthError('Usuario o contraseña incorrectos');
-      return;
-    }
-    setCurrentUser(data);
-    setIsLoggedIn(true);
+    if (error || !data) { setAuthError('Usuario o contraseña incorrectos'); return; }
+    setCurrentUser(data); setIsLoggedIn(true);
     setLoginForm({ username: '', password: '' });
   };
 
   const handleRegister = async () => {
     setAuthError('');
     if (!registerForm.username.trim() || !registerForm.password.trim() || !registerForm.confirm.trim()) {
-      setAuthError('Completa todos los campos');
-      return;
+      setAuthError('Completa todos los campos'); return;
     }
-    if (registerForm.password.length < 4) {
-      setAuthError('La contraseña debe tener al menos 4 caracteres');
-      return;
-    }
-    if (registerForm.password !== registerForm.confirm) {
-      setAuthError('Las contraseñas no coinciden');
-      return;
-    }
+    if (registerForm.password.length < 4) { setAuthError('La contraseña debe tener al menos 4 caracteres'); return; }
+    if (registerForm.password !== registerForm.confirm) { setAuthError('Las contraseñas no coinciden'); return; }
     setAuthLoading(true);
-    const { data: existing } = await supabase
-      .from('usuarios')
-      .select('id')
-      .eq('username', registerForm.username.trim())
-      .maybeSingle();
-    if (existing) {
-      setAuthLoading(false);
-      setAuthError('Ese nombre de usuario ya está en uso');
-      return;
-    }
-    const { data, error } = await supabase
-      .from('usuarios')
+    const { data: existing } = await supabase.from('usuarios').select('id')
+      .eq('username', registerForm.username.trim()).maybeSingle();
+    if (existing) { setAuthLoading(false); setAuthError('Ese nombre de usuario ya está en uso'); return; }
+    const { data, error } = await supabase.from('usuarios')
       .insert({ username: registerForm.username.trim(), password: registerForm.password })
-      .select('id, username')
-      .single();
+      .select('id, username').single();
     setAuthLoading(false);
-    if (error || !data) {
-      setAuthError('Error al registrar. Intenta de nuevo.');
-      return;
-    }
+    if (error || !data) { setAuthError('Error al registrar. Intenta de nuevo.'); return; }
     const defaultCats = ['Transporte','Vivienda','Alimentación','Servicios','Entretenimiento','Salud','Educación','Otros'];
     await supabase.from('categorias').insert(defaultCats.map(n => ({ usuario_id: data.id, nombre: n })));
-    setCurrentUser(data);
-    setIsLoggedIn(true);
+    setCurrentUser(data); setIsLoggedIn(true);
     setRegisterForm({ username: '', password: '', confirm: '' });
   };
 
   const handleLogout = () => {
-    setIsLoggedIn(false);
-    setCurrentUser(null);
-    setFixedExpenses([]);
-    setGeneralExpenses([]);
-    setSalaries([]);
-    setCategories([]);
+    setIsLoggedIn(false); setCurrentUser(null);
+    setFixedExpenses([]); setGeneralExpenses([]); setSalaries([]); setCategories([]);
   };
 
   // ─── CARGA DE DATOS ─────────────────────────────────────────────────────────
@@ -155,7 +178,9 @@ const ExpenseTrackerApp = () => {
     fechaRenovacion: r.fecha_renovacion,
     proximaRenovacion: r.proxima_renovacion,
     costoQuincenal: r.costo_quincenal, costoMensual: r.costo_mensual,
-    costoAnual: r.costo_anual, diasRestantes: r.dias_restantes,
+    costoAnual: r.costo_anual,
+    diasRestantes: daysRemainingCol(r.proxima_renovacion),
+    activo: r.activo !== false, // default true si null
   });
   const mapGeneral = (r) => ({
     id: r.id, descripcion: r.descripcion, precio: r.precio,
@@ -167,48 +192,35 @@ const ExpenseTrackerApp = () => {
 
   // ─── GASTOS FIJOS ───────────────────────────────────────────────────────────
 
-  const calculateDaysRemaining = (renewalDate) => {
-    const today = new Date();
-    const renewal = new Date(renewalDate);
-    return Math.ceil((renewal - today) / (1000 * 60 * 60 * 24));
-  };
-
-  const calculateNextRenewal = (currentDate, frequency) => {
-    const date = new Date(currentDate);
-    if (frequency === 'quincenal') date.setDate(date.getDate() + 15);
-    else date.setMonth(date.getMonth() + 1);
-    return date.toISOString().split('T')[0];
-  };
-
   const addFixedExpense = async () => {
     if (!newFixed.servicio || !newFixed.precio || !newFixed.fechaRenovacion) return;
     const precio = parseFloat(newFixed.precio);
     const costoQuincenal = newFixed.frecuencia === 'quincenal' ? precio : 0;
     const costoMensual = newFixed.frecuencia === 'mensual' ? precio : precio * 2;
     const costoAnual = costoMensual * 12;
-    const proximaRenovacion = calculateNextRenewal(newFixed.fechaRenovacion, newFixed.frecuencia);
-    const diasRestantes = calculateDaysRemaining(proximaRenovacion);
+    const proximaRenovacion = nextRenewal(newFixed.fechaRenovacion, newFixed.frecuencia);
+    const diasRestantes = daysRemainingCol(proximaRenovacion);
 
     const payload = {
       usuario_id: currentUser.id,
-      servicio: newFixed.servicio,
-      categoria: newFixed.categoria,
+      servicio: newFixed.servicio, categoria: newFixed.categoria,
       precio, frecuencia: newFixed.frecuencia,
       fecha_renovacion: newFixed.fechaRenovacion,
       proxima_renovacion: proximaRenovacion,
-      costo_quincenal: costoQuincenal,
-      costo_mensual: costoMensual,
-      costo_anual: costoAnual,
-      dias_restantes: diasRestantes,
+      costo_quincenal: costoQuincenal, costo_mensual: costoMensual,
+      costo_anual: costoAnual, dias_restantes: diasRestantes,
+      activo: true,
     };
 
     if (editingFixed) {
       const { data } = await supabase.from('gastos_fijos').update(payload).eq('id', editingFixed.id).select().single();
-      if (data) setFixedExpenses(prev => prev.map(e => e.id === data.id ? mapFixed(data) : e).sort((a,b) => new Date(a.fechaRenovacion)-new Date(b.fechaRenovacion)));
+      if (data) setFixedExpenses(prev => prev.map(e => e.id === data.id ? mapFixed(data) : e)
+        .sort((a,b) => (parseColDate(a.fechaRenovacion) - parseColDate(b.fechaRenovacion))));
       setEditingFixed(null);
     } else {
       const { data } = await supabase.from('gastos_fijos').insert(payload).select().single();
-      if (data) setFixedExpenses(prev => [...prev, mapFixed(data)].sort((a,b) => new Date(a.fechaRenovacion)-new Date(b.fechaRenovacion)));
+      if (data) setFixedExpenses(prev => [...prev, mapFixed(data)]
+        .sort((a,b) => (parseColDate(a.fechaRenovacion) - parseColDate(b.fechaRenovacion))));
     }
     setNewFixed({ servicio:'', categoria: categories[0]?.nombre || '', precio:'', frecuencia:'mensual', fechaRenovacion:'' });
   };
@@ -228,6 +240,32 @@ const ExpenseTrackerApp = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  // ─── NUEVO: Renovar fecha de un gasto fijo ───────────────────────────────
+  const renewFixedExpense = async (expense) => {
+    const nuevaFechaRenovacion = expense.proximaRenovacion; // la próxima pasa a ser la actual
+    const nuevaProxima = nextRenewal(nuevaFechaRenovacion, expense.frecuencia);
+    const nuevosDias = daysRemainingCol(nuevaProxima);
+
+    const payload = {
+      fecha_renovacion: nuevaFechaRenovacion,
+      proxima_renovacion: nuevaProxima,
+      dias_restantes: nuevosDias,
+    };
+
+    const { data } = await supabase.from('gastos_fijos').update(payload).eq('id', expense.id).select().single();
+    if (data) {
+      setFixedExpenses(prev => prev.map(e => e.id === data.id ? mapFixed(data) : e)
+        .sort((a,b) => parseColDate(a.fechaRenovacion) - parseColDate(b.fechaRenovacion)));
+    }
+  };
+
+  // ─── NUEVO: Activar/Desactivar gasto fijo ────────────────────────────────
+  const toggleFixedExpense = async (expense) => {
+    const nuevoEstado = !expense.activo;
+    const { data } = await supabase.from('gastos_fijos').update({ activo: nuevoEstado }).eq('id', expense.id).select().single();
+    if (data) setFixedExpenses(prev => prev.map(e => e.id === data.id ? mapFixed(data) : e));
+  };
+
   // ─── GASTOS GENERALES ───────────────────────────────────────────────────────
 
   const addGeneralExpense = async () => {
@@ -240,14 +278,16 @@ const ExpenseTrackerApp = () => {
     };
     if (editingGeneral) {
       const { data } = await supabase.from('gastos_generales').update(payload).eq('id', editingGeneral.id).select().single();
-      if (data) setGeneralExpenses(prev => prev.map(e => e.id === data.id ? mapGeneral(data) : e).sort((a,b) => new Date(a.fecha)-new Date(b.fecha)));
+      if (data) setGeneralExpenses(prev => prev.map(e => e.id === data.id ? mapGeneral(data) : e)
+        .sort((a,b) => parseColDate(a.fecha) - parseColDate(b.fecha)));
       setEditingGeneral(null);
     } else {
       const { data } = await supabase.from('gastos_generales').insert(payload).select().single();
-      if (data) setGeneralExpenses(prev => [...prev, mapGeneral(data)].sort((a,b) => new Date(a.fecha)-new Date(b.fecha)));
+      if (data) setGeneralExpenses(prev => [...prev, mapGeneral(data)]
+        .sort((a,b) => parseColDate(a.fecha) - parseColDate(b.fecha)));
     }
-    const d = new Date();
-    setNewGeneral({ descripcion:'', precio:'', mes: d.toLocaleString('es',{month:'long'}), fecha: d.toISOString().split('T')[0], año: d.getFullYear() });
+    const hoy = todayCol();
+    setNewGeneral({ descripcion:'', precio:'', mes: monthNameFromDate(hoy), fecha: hoy, año: yearFromDate(hoy) });
   };
 
   const deleteGeneralExpense = async (id) => {
@@ -260,17 +300,16 @@ const ExpenseTrackerApp = () => {
     setNewGeneral({
       descripcion: expense.descripcion, precio: expense.precio.toString(),
       mes: expense.mes, fecha: expense.fecha,
-      año: expense.año || new Date(expense.fecha).getFullYear(),
+      año: expense.año || yearFromDate(expense.fecha),
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const cancelEdit = () => {
-    setEditingFixed(null);
-    setEditingGeneral(null);
-    const d = new Date();
+    setEditingFixed(null); setEditingGeneral(null);
+    const hoy = todayCol();
     setNewFixed({ servicio:'', categoria: categories[0]?.nombre || '', precio:'', frecuencia:'mensual', fechaRenovacion:'' });
-    setNewGeneral({ descripcion:'', precio:'', mes: d.toLocaleString('es',{month:'long'}), fecha: d.toISOString().split('T')[0], año: d.getFullYear() });
+    setNewGeneral({ descripcion:'', precio:'', mes: monthNameFromDate(hoy), fecha: hoy, año: yearFromDate(hoy) });
   };
 
   // ─── CATEGORÍAS ─────────────────────────────────────────────────────────────
@@ -312,8 +351,9 @@ const ExpenseTrackerApp = () => {
       frecuencia: salary.frecuencia,
       fecha_pago: salary.fechaPago,
     }).select().single();
-    if (data) setSalaries(prev => [mapSalary(data), ...prev].sort((a,b) => new Date(b.fechaPago)-new Date(a.fechaPago)));
-    setSalary({ monto:'', frecuencia:'mensual', fechaPago: new Date().toISOString().split('T')[0] });
+    if (data) setSalaries(prev => [mapSalary(data), ...prev]
+      .sort((a,b) => parseColDate(b.fechaPago) - parseColDate(a.fechaPago)));
+    setSalary({ monto:'', frecuencia:'mensual', fechaPago: todayCol() });
   };
 
   const deleteSalary = async (id) => {
@@ -327,23 +367,23 @@ const ExpenseTrackerApp = () => {
   const formatCurrency = (amount) =>
     new Intl.NumberFormat('es-CO', { style:'currency', currency:'COP', minimumFractionDigits:0, maximumFractionDigits:0 }).format(amount);
 
-  const getTotalFixedMensual = () => fixedExpenses.reduce((sum, e) => sum + e.costoMensual, 0);
-  const getTotalFixedAnual = () => fixedExpenses.reduce((sum, e) => sum + e.costoAnual, 0);
+  // Solo gastos fijos ACTIVOS cuentan para totales
+  const getTotalFixedMensual = () => fixedExpenses.filter(e => e.activo).reduce((sum, e) => sum + e.costoMensual, 0);
+  const getTotalFixedAnual = () => fixedExpenses.filter(e => e.activo).reduce((sum, e) => sum + e.costoAnual, 0);
 
   const handleMonthChange = (selectedMonth) => {
     const idx = MONTHS.indexOf(selectedMonth);
-    const year = newGeneral.año || new Date().getFullYear();
-    const d = new Date(year, idx, 1);
+    const year = newGeneral.año || yearFromDate(todayCol());
+    const d = new Date(Date.UTC(year, idx, 1));
     setNewGeneral({ ...newGeneral, mes: selectedMonth, fecha: d.toISOString().split('T')[0] });
   };
 
   const handleDateChange = (selectedDate) => {
-    const date = new Date(selectedDate);
-    setNewGeneral({ ...newGeneral, fecha: selectedDate, mes: date.toLocaleString('es',{month:'long'}), año: date.getFullYear() });
+    setNewGeneral({ ...newGeneral, fecha: selectedDate, mes: monthNameFromDate(selectedDate), año: yearFromDate(selectedDate) });
   };
 
   const getFilteredGeneralExpenses = () => generalExpenses.filter(e => {
-    const year = new Date(e.fecha).getFullYear().toString();
+    const year = yearFromDate(e.fecha).toString();
     return (filterMonth === 'todos' || e.mes === filterMonth) && (filterYear === 'todos' || year === filterYear);
   });
 
@@ -355,11 +395,10 @@ const ExpenseTrackerApp = () => {
   const getFinancialHealth = () => {
     if (salaries.length === 0) return null;
     const sueldo = salaries[0].monto;
-    const now = new Date();
-    const currentMonthName = now.toLocaleString('es', { month: 'long' });
-    const currentYear = now.getFullYear();
+    const currentMonthName = monthNameFromDate(todayCol());
+    const currentYear = yearFromDate(todayCol());
     const gastosGeneralesMes = generalExpenses
-      .filter(e => e.mes === currentMonthName && (e.año === currentYear || new Date(e.fecha).getFullYear() === currentYear))
+      .filter(e => e.mes === currentMonthName && (e.año === currentYear || yearFromDate(e.fecha) === currentYear))
       .reduce((sum, e) => sum + e.precio, 0);
     const gastosFijos = getTotalFixedMensual();
     const totalGastado = gastosFijos + gastosGeneralesMes;
@@ -376,7 +415,7 @@ const ExpenseTrackerApp = () => {
   const getGeneralByMonthGrouped = () => {
     const byMonth = {};
     generalExpenses.forEach(e => {
-      const año = e.año || new Date(e.fecha).getFullYear();
+      const año = e.año || yearFromDate(e.fecha);
       const key = `${e.mes}__${año}`;
       if (!byMonth[key]) byMonth[key] = { mes: e.mes, año, total: 0, items: [] };
       byMonth[key].total += e.precio;
@@ -389,32 +428,32 @@ const ExpenseTrackerApp = () => {
   };
 
   const calculateFixedExpensesForPeriod = (salaryDate, frequency) => {
-    const startDate = new Date(salaryDate);
-    const endDate = new Date(salaryDate);
-    if (frequency === 'quincenal') endDate.setDate(endDate.getDate() + 15);
-    else endDate.setMonth(endDate.getMonth() + 1);
+    const startDate = parseColDate(salaryDate);
+    const endDate = parseColDate(salaryDate);
+    if (frequency === 'quincenal') endDate.setUTCDate(endDate.getUTCDate() + 15);
+    else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
     let total = 0; const details = [];
-    fixedExpenses.forEach(e => {
-      const d = new Date(e.fechaRenovacion);
+    fixedExpenses.filter(e => e.activo).forEach(e => {
+      const d = parseColDate(e.fechaRenovacion);
       if (d >= startDate && d <= endDate) { total += e.precio; details.push({ servicio: e.servicio, monto: e.precio, fecha: e.fechaRenovacion }); }
     });
     return { total, details };
   };
 
   const calculateGeneralExpensesForPeriod = (salaryDate, frequency) => {
-    const startDate = new Date(salaryDate);
-    const endDate = new Date(salaryDate);
-    if (frequency === 'quincenal') endDate.setDate(endDate.getDate() + 15);
-    else endDate.setMonth(endDate.getMonth() + 1);
+    const startDate = parseColDate(salaryDate);
+    const endDate = parseColDate(salaryDate);
+    if (frequency === 'quincenal') endDate.setUTCDate(endDate.getUTCDate() + 15);
+    else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
     let total = 0; const details = [];
     generalExpenses.forEach(e => {
-      const d = new Date(e.fecha);
+      const d = parseColDate(e.fecha);
       if (d >= startDate && d <= endDate) { total += e.precio; details.push({ descripcion: e.descripcion, monto: e.precio, fecha: e.fecha }); }
     });
     return { total, details };
   };
 
-  // ─── PANTALLA DE LOGIN ──────────────────────────────────────────────────────
+  // ─── PANTALLA LOGIN ──────────────────────────────────────────────────────────
 
   if (!isLoggedIn) {
     return (
@@ -542,9 +581,12 @@ const ExpenseTrackerApp = () => {
                   <option value="quincenal">Quincenal</option>
                   <option value="mensual">Mensual</option>
                 </select>
-                <input type="date" value={newFixed.fechaRenovacion}
-                  onChange={e => setNewFixed({...newFixed, fechaRenovacion: e.target.value})}
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Fecha de renovación actual</label>
+                  <input type="date" value={newFixed.fechaRenovacion}
+                    onChange={e => setNewFixed({...newFixed, fechaRenovacion: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+                </div>
               </div>
               <div className="mt-4 flex gap-2">
                 <button onClick={addFixedExpense}
@@ -559,42 +601,77 @@ const ExpenseTrackerApp = () => {
               <h2 className="text-2xl font-bold text-gray-800 mb-4">Gastos Fijos Registrados</h2>
               <div className="mb-4 grid grid-cols-2 gap-4">
                 <div className="bg-blue-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Total Mensual</p>
+                  <p className="text-sm text-gray-600">Total Mensual (activos)</p>
                   <p className="text-2xl font-bold text-blue-600">{formatCurrency(getTotalFixedMensual())}</p>
                 </div>
                 <div className="bg-green-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Total Anual</p>
+                  <p className="text-sm text-gray-600">Total Anual (activos)</p>
                   <p className="text-2xl font-bold text-green-600">{formatCurrency(getTotalFixedAnual())}</p>
                 </div>
               </div>
+
+              {/* Leyenda */}
+              <div className="mb-3 flex gap-4 text-xs text-gray-500">
+                <span className="flex items-center gap-1"><RefreshCw className="w-3 h-3 text-blue-500"/>Renovar — avanza a la próxima fecha</span>
+                <span className="flex items-center gap-1"><Power className="w-3 h-3 text-green-500"/>Activar/Desactivar registro</span>
+              </div>
+
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead className="bg-gray-100">
                     <tr>
-                      {['Servicio','Categoría','Precio','C. Quincenal','C. Mensual','C. Anual','Próx. Renov.','Días','Acciones'].map(h => (
-                        <th key={h} className="px-4 py-2 text-left text-sm font-semibold">{h}</th>
+                      {['Estado','Servicio','Categoría','Precio','C. Quincenal','C. Mensual','C. Anual','Fecha Renov.','Próx. Renov.','Días','Acciones'].map(h => (
+                        <th key={h} className="px-3 py-2 text-left text-xs font-semibold">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {fixedExpenses.map(e => (
-                      <tr key={e.id} className="border-b hover:bg-gray-50">
-                        <td className="px-4 py-3">{e.servicio}</td>
-                        <td className="px-4 py-3">{e.categoria}</td>
-                        <td className="px-4 py-3">{formatCurrency(e.precio)}</td>
-                        <td className="px-4 py-3">{formatCurrency(e.costoQuincenal)}</td>
-                        <td className="px-4 py-3 font-semibold">{formatCurrency(e.costoMensual)}</td>
-                        <td className="px-4 py-3">{formatCurrency(e.costoAnual)}</td>
-                        <td className="px-4 py-3">{new Date(e.proximaRenovacion).toLocaleDateString('es-CO')}</td>
-                        <td className="px-4 py-3">
-                          <span className={`px-2 py-1 rounded-full text-xs font-semibold ${e.diasRestantes < 7 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                      <tr key={e.id} className={`border-b transition-colors ${e.activo ? 'hover:bg-gray-50' : 'bg-gray-50 opacity-60'}`}>
+                        {/* Estado activo/inactivo */}
+                        <td className="px-3 py-3">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${e.activo ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-500'}`}>
+                            {e.activo ? 'Activo' : 'Inactivo'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 font-medium">{e.servicio}</td>
+                        <td className="px-3 py-3">{e.categoria}</td>
+                        <td className="px-3 py-3">{formatCurrency(e.precio)}</td>
+                        <td className="px-3 py-3">{formatCurrency(e.costoQuincenal)}</td>
+                        <td className="px-3 py-3 font-semibold">{formatCurrency(e.costoMensual)}</td>
+                        <td className="px-3 py-3">{formatCurrency(e.costoAnual)}</td>
+                        <td className="px-3 py-3 text-sm">{formatDateCol(e.fechaRenovacion)}</td>
+                        <td className="px-3 py-3 text-sm">{formatDateCol(e.proximaRenovacion)}</td>
+                        <td className="px-3 py-3">
+                          <span className={`px-2 py-1 rounded-full text-xs font-semibold ${e.diasRestantes < 7 ? 'bg-red-100 text-red-700' : e.diasRestantes < 15 ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>
                             {e.diasRestantes}d
                           </span>
                         </td>
-                        <td className="px-4 py-3">
-                          <div className="flex gap-2">
-                            <button onClick={() => editFixedExpense(e)} className="text-blue-500 hover:text-blue-700"><Edit2 className="w-4 h-4"/></button>
-                            <button onClick={() => deleteFixedExpense(e.id)} className="text-red-500 hover:text-red-700"><Trash2 className="w-4 h-4"/></button>
+                        <td className="px-3 py-3">
+                          <div className="flex gap-1.5 items-center">
+                            {/* Renovar */}
+                            <button
+                              onClick={() => renewFixedExpense(e)}
+                              disabled={!e.activo}
+                              title="Renovar — avanza la fecha a la próxima"
+                              className="text-blue-500 hover:text-blue-700 disabled:opacity-30 disabled:cursor-not-allowed p-1 rounded hover:bg-blue-50">
+                              <RefreshCw className="w-4 h-4"/>
+                            </button>
+                            {/* Activar/Desactivar */}
+                            <button
+                              onClick={() => toggleFixedExpense(e)}
+                              title={e.activo ? 'Desactivar registro' : 'Activar registro'}
+                              className={`p-1 rounded ${e.activo ? 'text-green-500 hover:text-green-700 hover:bg-green-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}>
+                              <Power className="w-4 h-4"/>
+                            </button>
+                            {/* Editar */}
+                            <button onClick={() => editFixedExpense(e)} className="text-indigo-500 hover:text-indigo-700 p-1 rounded hover:bg-indigo-50">
+                              <Edit2 className="w-4 h-4"/>
+                            </button>
+                            {/* Eliminar */}
+                            <button onClick={() => deleteFixedExpense(e.id)} className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50">
+                              <Trash2 className="w-4 h-4"/>
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -629,8 +706,11 @@ const ExpenseTrackerApp = () => {
                   className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                   {MONTHS.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase()+m.slice(1)}</option>)}
                 </select>
-                <input type="date" value={newGeneral.fecha} onChange={e => handleDateChange(e.target.value)}
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Fecha del gasto (hora Colombia)</label>
+                  <input type="date" value={newGeneral.fecha} onChange={e => handleDateChange(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+                </div>
               </div>
               <div className="mt-4 flex gap-2">
                 <button onClick={addGeneralExpense}
@@ -684,7 +764,7 @@ const ExpenseTrackerApp = () => {
                         <td className="px-4 py-3">{e.descripcion}</td>
                         <td className="px-4 py-3 font-semibold">{formatCurrency(e.precio)}</td>
                         <td className="px-4 py-3 capitalize">{e.mes}</td>
-                        <td className="px-4 py-3">{new Date(e.fecha).toLocaleDateString('es-CO')}</td>
+                        <td className="px-4 py-3">{formatDateCol(e.fecha)}</td>
                         <td className="px-4 py-3">
                           <div className="flex gap-2">
                             <button onClick={() => editGeneralExpense(e)} className="text-blue-500 hover:text-blue-700"><Edit2 className="w-4 h-4"/></button>
@@ -754,10 +834,9 @@ const ExpenseTrackerApp = () => {
               </div>
             )}
 
-            {/* Resumen anual — solo fijos */}
             <div className="bg-white rounded-xl shadow-md p-6">
               <h2 className="text-2xl font-bold text-gray-800 mb-1">Resumen Anual — Gastos Fijos</h2>
-              <p className="text-gray-400 text-sm mb-4">Proyección basada en los servicios fijos actuales</p>
+              <p className="text-gray-400 text-sm mb-4">Solo incluye registros activos</p>
               <div className="grid grid-cols-2 gap-4 mb-4">
                 <div className="bg-blue-50 p-4 rounded-lg">
                   <p className="text-sm text-gray-600">Total Mensual</p>
@@ -779,7 +858,7 @@ const ExpenseTrackerApp = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {fixedExpenses.map(e => (
+                    {fixedExpenses.filter(e => e.activo).map(e => (
                       <tr key={e.id} className="border-b hover:bg-gray-50">
                         <td className="px-4 py-3">{e.servicio}</td>
                         <td className="px-4 py-3">{e.categoria}</td>
@@ -794,11 +873,10 @@ const ExpenseTrackerApp = () => {
                     </tr>
                   </tbody>
                 </table>
-                {fixedExpenses.length === 0 && <p className="text-center py-8 text-gray-400">No hay gastos fijos registrados</p>}
+                {fixedExpenses.filter(e => e.activo).length === 0 && <p className="text-center py-8 text-gray-400">No hay gastos fijos activos</p>}
               </div>
             </div>
 
-            {/* Gastos generales por mes */}
             <div className="bg-white rounded-xl shadow-md p-6">
               <h2 className="text-2xl font-bold text-gray-800 mb-4">Gastos Generales por Mes</h2>
               {groupedGeneral.length === 0 ? (
@@ -830,7 +908,7 @@ const ExpenseTrackerApp = () => {
                           <tbody>
                             {group.items.map(item => (
                               <tr key={item.id} className="border-b last:border-0 hover:bg-gray-50">
-                                <td className="py-2 text-sm text-gray-500">{new Date(item.fecha).toLocaleDateString('es-CO')}</td>
+                                <td className="py-2 text-sm text-gray-500">{formatDateCol(item.fecha)}</td>
                                 <td className="py-2 text-sm">{item.descripcion}</td>
                                 <td className="py-2 text-sm font-semibold text-right">{formatCurrency(item.precio)}</td>
                               </tr>
@@ -903,8 +981,11 @@ const ExpenseTrackerApp = () => {
                   <option value="quincenal">Quincenal</option>
                   <option value="mensual">Mensual</option>
                 </select>
-                <input type="date" value={salary.fechaPago} onChange={e => setSalary({...salary, fechaPago: e.target.value})}
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"/>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Fecha de pago (hora Colombia)</label>
+                  <input type="date" value={salary.fechaPago} onChange={e => setSalary({...salary, fechaPago: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"/>
+                </div>
               </div>
               <button onClick={addSalary}
                 className="mt-4 bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 flex items-center gap-2">
@@ -920,6 +1001,11 @@ const ExpenseTrackerApp = () => {
                   const totalGastos = fixedData.total + generalData.total;
                   const saldo = s.monto - totalGastos;
                   const pct = s.monto > 0 ? (totalGastos / s.monto) * 100 : 0;
+
+                  const endDate = parseColDate(s.fechaPago);
+                  if (s.frecuencia === 'quincenal') endDate.setUTCDate(endDate.getUTCDate() + 15);
+                  else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+
                   return (
                     <div key={s.id} className={`bg-white rounded-xl shadow-md p-6 border-2 ${index===0 ? 'border-indigo-400' : 'border-transparent'}`}>
                       <div className="flex justify-between items-start mb-4">
@@ -929,35 +1015,267 @@ const ExpenseTrackerApp = () => {
                             {index===0 && <span className="bg-indigo-100 text-indigo-700 text-xs font-semibold px-2 py-0.5 rounded-full">Más Reciente</span>}
                           </div>
                           <p className="text-sm text-gray-500">
-                            {new Date(s.fechaPago).toLocaleDateString('es-CO',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}
+                            {formatDateCol(s.fechaPago)}
+                          </p>
+                          <p className="text-xs text-gray-400">
+                            Período: {formatDateCol(s.fechaPago)} → {formatDateCol(endDate.toISOString().split('T')[0])}
                           </p>
                         </div>
                         <button onClick={() => deleteSalary(s.id)} className="text-red-500 hover:text-red-700 p-2 rounded-lg hover:bg-red-50"><Trash2 className="w-5 h-5"/></button>
                       </div>
+
+                      {/* Tarjetas resumen */}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
                         <div className="bg-blue-50 p-3 rounded-lg"><p className="text-xs text-gray-500">Sueldo</p><p className="text-xl font-bold text-blue-600">{formatCurrency(s.monto)}</p></div>
-                        <div className="bg-red-50 p-3 rounded-lg"><p className="text-xs text-gray-500">Gastos Fijos</p><p className="text-xl font-bold text-red-600">{formatCurrency(fixedData.total)}</p></div>
-                        <div className="bg-orange-50 p-3 rounded-lg"><p className="text-xs text-gray-500">Gastos Generales</p><p className="text-xl font-bold text-orange-600">{formatCurrency(generalData.total)}</p></div>
+                        <div className="bg-red-50 p-3 rounded-lg">
+                          <p className="text-xs text-gray-500">Gastos Fijos</p>
+                          <p className="text-xl font-bold text-red-600">{formatCurrency(fixedData.total)}</p>
+                          <p className="text-xs text-gray-400">{((fixedData.total/s.monto)*100).toFixed(1)}%</p>
+                        </div>
+                        <div className="bg-orange-50 p-3 rounded-lg">
+                          <p className="text-xs text-gray-500">Gastos Generales</p>
+                          <p className="text-xl font-bold text-orange-600">{formatCurrency(generalData.total)}</p>
+                          <p className="text-xs text-gray-400">{((generalData.total/s.monto)*100).toFixed(1)}%</p>
+                        </div>
                         <div className={`${saldo>=0?'bg-green-50':'bg-red-50'} p-3 rounded-lg`}>
                           <p className="text-xs text-gray-500">{saldo>=0?'Saldo':'Déficit'}</p>
                           <p className={`text-xl font-bold ${saldo>=0?'text-green-600':'text-red-600'}`}>{formatCurrency(Math.abs(saldo))}</p>
                         </div>
                       </div>
+
+                      {/* Barra de progreso */}
                       <div className="w-full bg-gray-200 rounded-full h-5 overflow-hidden mb-1">
                         <div className={`h-full transition-all duration-500 flex items-center justify-end pr-2 ${pct>100?'bg-red-500':pct>80?'bg-orange-500':pct>50?'bg-yellow-500':'bg-green-500'}`}
                           style={{width:`${Math.min(pct,100)}%`}}>
                           {pct>15 && <span className="text-xs font-bold text-white">{pct.toFixed(0)}%</span>}
                         </div>
                       </div>
+
                       {pct > 100 && (
-                        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center gap-2 mt-2">
+                        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center gap-2 mt-2 mb-4">
                           <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0"/>
                           <p className="text-sm text-red-700 font-semibold">¡Presupuesto excedido en {formatCurrency(Math.abs(saldo))}!</p>
                         </div>
                       )}
+
+                      {/* Distribución + gráfico circular */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4 mb-4">
+                        <div>
+                          <h4 className="text-md font-semibold text-gray-800 mb-3">Distribución de Gastos</h4>
+                          <div className="space-y-3">
+                            <div>
+                              <div className="flex justify-between text-sm mb-1">
+                                <span className="text-gray-600">Gastos Fijos</span>
+                                <span className="font-semibold">{formatCurrency(fixedData.total)} <span className="text-xs text-gray-400">({((fixedData.total/s.monto)*100).toFixed(1)}%)</span></span>
+                              </div>
+                              <div className="w-full bg-gray-200 rounded-full h-4">
+                                <div className="bg-red-500 h-4 rounded-full transition-all" style={{width:`${Math.min((fixedData.total/s.monto)*100,100)}%`}}></div>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex justify-between text-sm mb-1">
+                                <span className="text-gray-600">Gastos Generales</span>
+                                <span className="font-semibold">{formatCurrency(generalData.total)} <span className="text-xs text-gray-400">({((generalData.total/s.monto)*100).toFixed(1)}%)</span></span>
+                              </div>
+                              <div className="w-full bg-gray-200 rounded-full h-4">
+                                <div className="bg-orange-500 h-4 rounded-full transition-all" style={{width:`${Math.min((generalData.total/s.monto)*100,100)}%`}}></div>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex justify-between text-sm mb-1">
+                                <span className="text-gray-600">{saldo>=0?'Disponible':'Déficit'}</span>
+                                <span className="font-semibold">{formatCurrency(Math.abs(saldo))} <span className="text-xs text-gray-400">({Math.abs((saldo/s.monto)*100).toFixed(1)}%)</span></span>
+                              </div>
+                              <div className="w-full bg-gray-200 rounded-full h-4">
+                                <div className={`${saldo>=0?'bg-green-500':'bg-red-500'} h-4 rounded-full transition-all`} style={{width:`${Math.min(Math.abs((saldo/s.monto)*100),100)}%`}}></div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Gráfico circular SVG */}
+                        <div>
+                          <h4 className="text-md font-semibold text-gray-800 mb-3">Resumen Visual</h4>
+                          <div className="bg-gradient-to-br from-indigo-50 to-purple-50 p-6 rounded-lg">
+                            <div className="text-center mb-4">
+                              <svg className="w-32 h-32 mx-auto" viewBox="0 0 36 36">
+                                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                                  fill="none" stroke="#E5E7EB" strokeWidth="3"/>
+                                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                                  fill="none"
+                                  stroke={pct>100?'#EF4444':pct>80?'#F97316':'#10B981'}
+                                  strokeWidth="3"
+                                  strokeDasharray={`${Math.min(pct,100)}, 100`}/>
+                                <text x="18" y="20.35" fontSize="8" fontWeight="bold" fill="#374151" textAnchor="middle">
+                                  {pct.toFixed(0)}%
+                                </text>
+                              </svg>
+                            </div>
+                            <p className="text-center text-sm text-gray-600 font-medium">
+                              {pct>100?'⚠️ Presupuesto excedido':pct>80?'🔶 Cerca del límite':pct>50?'🟡 Mitad del presupuesto':'✅ Buen manejo'}
+                            </p>
+                            <div className="mt-4 pt-4 border-t border-indigo-200">
+                              <div className="flex justify-between text-xs text-gray-600">
+                                <span>Total Gastos:</span>
+                                <span className="font-semibold text-gray-800">{formatCurrency(totalGastos)}</span>
+                              </div>
+                              <div className="flex justify-between text-xs text-gray-600 mt-1">
+                                <span>Total Sueldo:</span>
+                                <span className="font-semibold text-gray-800">{formatCurrency(s.monto)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Detalles expandibles del período */}
+                      <details className="group">
+                        <summary className="cursor-pointer bg-gray-50 hover:bg-gray-100 p-4 rounded-lg font-semibold text-gray-700 transition-colors flex justify-between items-center">
+                          <span>📋 Ver Detalles de Gastos del Período</span>
+                          <span className="text-gray-400 group-open:rotate-180 transition-transform">▼</span>
+                        </summary>
+                        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
+                          {fixedData.details.length > 0 ? (
+                            <div>
+                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                                <Calendar className="w-5 h-5 text-red-500"/>Gastos Fijos ({fixedData.details.length})
+                              </h4>
+                              <div className="bg-red-50 rounded-lg p-4 space-y-2 max-h-64 overflow-y-auto">
+                                {fixedData.details.map((detail, idx) => (
+                                  <div key={idx} className="flex justify-between items-start text-sm bg-white p-2 rounded">
+                                    <div className="flex-1">
+                                      <p className="font-medium text-gray-700">{detail.servicio}</p>
+                                      <p className="text-xs text-gray-500">{formatDateCol(detail.fecha)}</p>
+                                    </div>
+                                    <span className="font-semibold text-red-600">{formatCurrency(detail.monto)}</span>
+                                  </div>
+                                ))}
+                                <div className="flex justify-between text-sm font-bold bg-white p-2 rounded border-t-2 border-red-200">
+                                  <span className="text-gray-700">Subtotal:</span>
+                                  <span className="text-red-600">{formatCurrency(fixedData.total)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                                <Calendar className="w-5 h-5 text-red-500"/>Gastos Fijos
+                              </h4>
+                              <div className="bg-gray-50 rounded-lg p-4 text-center text-gray-500 text-sm">Sin gastos fijos en este período</div>
+                            </div>
+                          )}
+                          {generalData.details.length > 0 ? (
+                            <div>
+                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                                <DollarSign className="w-5 h-5 text-orange-500"/>Gastos Generales ({generalData.details.length})
+                              </h4>
+                              <div className="bg-orange-50 rounded-lg p-4 space-y-2 max-h-64 overflow-y-auto">
+                                {generalData.details.map((detail, idx) => (
+                                  <div key={idx} className="flex justify-between items-start text-sm bg-white p-2 rounded">
+                                    <div className="flex-1">
+                                      <p className="font-medium text-gray-700">{detail.descripcion}</p>
+                                      <p className="text-xs text-gray-500">{formatDateCol(detail.fecha)}</p>
+                                    </div>
+                                    <span className="font-semibold text-orange-600">{formatCurrency(detail.monto)}</span>
+                                  </div>
+                                ))}
+                                <div className="flex justify-between text-sm font-bold bg-white p-2 rounded border-t-2 border-orange-200">
+                                  <span className="text-gray-700">Subtotal:</span>
+                                  <span className="text-orange-600">{formatCurrency(generalData.total)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                                <DollarSign className="w-5 h-5 text-orange-500"/>Gastos Generales
+                              </h4>
+                              <div className="bg-gray-50 rounded-lg p-4 text-center text-gray-500 text-sm">Sin gastos generales en este período</div>
+                            </div>
+                          )}
+                        </div>
+                        <div className="mt-4 bg-indigo-50 border-2 border-indigo-200 rounded-lg p-4">
+                          <div className="flex justify-between items-center">
+                            <span className="text-lg font-bold text-gray-800">Total Gastos del Período:</span>
+                            <span className="text-2xl font-bold text-indigo-600">{formatCurrency(totalGastos)}</span>
+                          </div>
+                        </div>
+                      </details>
+
+                      {/* Comparación con período anterior */}
+                      {index < salaries.length - 1 && (() => {
+                        const prev = salaries[index + 1];
+                        const prevFixed = calculateFixedExpensesForPeriod(prev.fechaPago, prev.frecuencia);
+                        const prevGeneral = calculateGeneralExpensesForPeriod(prev.fechaPago, prev.frecuencia);
+                        const prevTotal = prevFixed.total + prevGeneral.total;
+                        const diffGastos = totalGastos - prevTotal;
+                        const diffSueldo = s.monto - prev.monto;
+                        return (
+                          <div className="mt-6 pt-6 border-t border-gray-200">
+                            <div className="bg-blue-50 rounded-lg p-4">
+                              <h4 className="text-md font-semibold text-gray-800 mb-3">📊 Comparación con Período Anterior</h4>
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                <div>
+                                  <p className="text-gray-600 mb-1">Cambio en Sueldo</p>
+                                  <p className={`font-bold text-lg ${diffSueldo>0?'text-green-600':diffSueldo<0?'text-red-600':'text-gray-600'}`}>
+                                    {diffSueldo>0?'↗':diffSueldo<0?'↘':'→'} {formatCurrency(Math.abs(diffSueldo))}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-600 mb-1">Cambio en Gastos</p>
+                                  <p className={`font-bold text-lg ${diffGastos<0?'text-green-600':diffGastos>0?'text-red-600':'text-gray-600'}`}>
+                                    {diffGastos>0?'↗':diffGastos<0?'↘':'→'} {formatCurrency(Math.abs(diffGastos))}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-gray-600 mb-1">Tendencia</p>
+                                  <p className="font-bold text-lg text-indigo-600">
+                                    {diffGastos<0&&diffSueldo>=0?'✅ Mejorando':diffGastos>0&&diffSueldo<=0?'⚠️ Empeorando':'➡️ Estable'}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}
+
+                {/* Estadísticas generales */}
+                <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-xl shadow-lg p-6 text-white">
+                  <h3 className="text-2xl font-bold mb-4">📈 Estadísticas Generales</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="bg-white bg-opacity-20 rounded-lg p-4">
+                      <p className="text-sm opacity-90 mb-1">Sueldo Promedio</p>
+                      <p className="text-2xl font-bold">{formatCurrency(salaries.reduce((s,r)=>s+r.monto,0)/salaries.length)}</p>
+                    </div>
+                    <div className="bg-white bg-opacity-20 rounded-lg p-4">
+                      <p className="text-sm opacity-90 mb-1">Gasto Promedio</p>
+                      <p className="text-2xl font-bold">
+                        {formatCurrency(salaries.reduce((s,r)=>{
+                          const f=calculateFixedExpensesForPeriod(r.fechaPago,r.frecuencia);
+                          const g=calculateGeneralExpensesForPeriod(r.fechaPago,r.frecuencia);
+                          return s+f.total+g.total;
+                        },0)/salaries.length)}
+                      </p>
+                    </div>
+                    <div className="bg-white bg-opacity-20 rounded-lg p-4">
+                      <p className="text-sm opacity-90 mb-1">Ahorro Promedio</p>
+                      <p className="text-2xl font-bold">
+                        {formatCurrency(salaries.reduce((s,r)=>{
+                          const f=calculateFixedExpensesForPeriod(r.fechaPago,r.frecuencia);
+                          const g=calculateGeneralExpensesForPeriod(r.fechaPago,r.frecuencia);
+                          return s+(r.monto-f.total-g.total);
+                        },0)/salaries.length)}
+                      </p>
+                    </div>
+                    <div className="bg-white bg-opacity-20 rounded-lg p-4">
+                      <p className="text-sm opacity-90 mb-1">Períodos Registrados</p>
+                      <p className="text-2xl font-bold">{salaries.length}</p>
+                    </div>
+                  </div>
+                </div>
               </div>
             ) : (
               <div className="bg-white rounded-xl shadow-md p-12 text-center">
