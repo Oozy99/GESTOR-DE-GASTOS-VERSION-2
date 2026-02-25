@@ -62,9 +62,7 @@ const nextRenewal = (dateStr, frequency) => {
 const ExpenseTrackerApp = () => {
   const [currentUser, setCurrentUser] = useState(null);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [loginMode, setLoginMode] = useState('login');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
-  const [registerForm, setRegisterForm] = useState({ username: '', password: '', confirm: '' });
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
@@ -118,28 +116,6 @@ const ExpenseTrackerApp = () => {
     setLoginForm({ username: '', password: '' });
   };
 
-  const handleRegister = async () => {
-    setAuthError('');
-    if (!registerForm.username.trim() || !registerForm.password.trim() || !registerForm.confirm.trim()) {
-      setAuthError('Completa todos los campos'); return;
-    }
-    if (registerForm.password.length < 4) { setAuthError('La contraseña debe tener al menos 4 caracteres'); return; }
-    if (registerForm.password !== registerForm.confirm) { setAuthError('Las contraseñas no coinciden'); return; }
-    setAuthLoading(true);
-    const { data: existing } = await supabase.from('usuarios').select('id')
-      .eq('username', registerForm.username.trim()).maybeSingle();
-    if (existing) { setAuthLoading(false); setAuthError('Ese nombre de usuario ya está en uso'); return; }
-    const { data, error } = await supabase.from('usuarios')
-      .insert({ username: registerForm.username.trim(), password: registerForm.password })
-      .select('id, username').single();
-    setAuthLoading(false);
-    if (error || !data) { setAuthError('Error al registrar. Intenta de nuevo.'); return; }
-    const defaultCats = ['Transporte','Vivienda','Alimentación','Servicios','Entretenimiento','Salud','Educación','Otros'];
-    await supabase.from('categorias').insert(defaultCats.map(n => ({ usuario_id: data.id, nombre: n })));
-    setCurrentUser(data); setIsLoggedIn(true);
-    setRegisterForm({ username: '', password: '', confirm: '' });
-  };
-
   const handleLogout = () => {
     setIsLoggedIn(false); setCurrentUser(null);
     setFixedExpenses([]); setGeneralExpenses([]); setSalaries([]); setCategories([]);
@@ -181,6 +157,8 @@ const ExpenseTrackerApp = () => {
     costoAnual: r.costo_anual,
     diasRestantes: daysRemainingCol(r.proxima_renovacion),
     activo: r.activo !== false, // default true si null
+    ultimoRefresco: r.ultimo_refresco || null,
+    fechaDesactivacion: r.fecha_desactivacion || null,
   });
   const mapGeneral = (r) => ({
     id: r.id, descripcion: r.descripcion, precio: r.precio,
@@ -242,16 +220,15 @@ const ExpenseTrackerApp = () => {
 
   // ─── NUEVO: Renovar fecha de un gasto fijo ───────────────────────────────
   const renewFixedExpense = async (expense) => {
-    const nuevaFechaRenovacion = expense.proximaRenovacion; // la próxima pasa a ser la actual
-    const nuevaProxima = nextRenewal(nuevaFechaRenovacion, expense.frecuencia);
+    const hoy = todayCol();
+    const nuevaProxima = nextRenewal(hoy, expense.frecuencia);
     const nuevosDias = daysRemainingCol(nuevaProxima);
-
     const payload = {
-      fecha_renovacion: nuevaFechaRenovacion,
+      fecha_renovacion: hoy,
       proxima_renovacion: nuevaProxima,
       dias_restantes: nuevosDias,
+      ultimo_refresco: hoy,
     };
-
     const { data } = await supabase.from('gastos_fijos').update(payload).eq('id', expense.id).select().single();
     if (data) {
       setFixedExpenses(prev => prev.map(e => e.id === data.id ? mapFixed(data) : e)
@@ -262,7 +239,17 @@ const ExpenseTrackerApp = () => {
   // ─── NUEVO: Activar/Desactivar gasto fijo ────────────────────────────────
   const toggleFixedExpense = async (expense) => {
     const nuevoEstado = !expense.activo;
-    const { data } = await supabase.from('gastos_fijos').update({ activo: nuevoEstado }).eq('id', expense.id).select().single();
+    const hoy = todayCol();
+    let payload = { activo: nuevoEstado };
+    if (!nuevoEstado) {
+      // Al DESACTIVAR: guardamos la fecha y calculamos próxima desde hoy
+      const proximaDesdeHoy = nextRenewal(hoy, expense.frecuencia);
+      payload = { ...payload, fecha_desactivacion: hoy, proxima_renovacion: proximaDesdeHoy, dias_restantes: daysRemainingCol(proximaDesdeHoy) };
+    } else {
+      // Al REACTIVAR: limpiamos la fecha de desactivación
+      payload = { ...payload, fecha_desactivacion: null };
+    }
+    const { data } = await supabase.from('gastos_fijos').update(payload).eq('id', expense.id).select().single();
     if (data) setFixedExpenses(prev => prev.map(e => e.id === data.id ? mapFixed(data) : e));
   };
 
@@ -462,49 +449,23 @@ const ExpenseTrackerApp = () => {
           <div className="text-center mb-6">
             <DollarSign className="w-16 h-16 mx-auto text-indigo-600 mb-3" />
             <h1 className="text-3xl font-bold text-gray-800">Gestor de Gastos</h1>
-          </div>
-          <div className="flex mb-6 bg-gray-100 rounded-lg p-1">
-            {[['login','Iniciar Sesión'],['register','Registrarse']].map(([m,label]) => (
-              <button key={m} onClick={() => { setLoginMode(m); setAuthError(''); }}
-                className={`flex-1 py-2 rounded-md font-semibold text-sm transition-colors ${loginMode===m ? 'bg-white text-indigo-600 shadow' : 'text-gray-500'}`}>
-                {label}
-              </button>
-            ))}
+            <p className="text-gray-500 text-sm mt-2">Ingresa con tus credenciales</p>
           </div>
           {authError && <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{authError}</div>}
-          {loginMode === 'login' ? (
-            <div className="space-y-4">
-              <input type="text" placeholder="Usuario" value={loginForm.username}
-                onChange={e => setLoginForm({...loginForm, username: e.target.value})}
-                onKeyPress={e => e.key==='Enter' && handleLogin()}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
-              <input type="password" placeholder="Contraseña" value={loginForm.password}
-                onChange={e => setLoginForm({...loginForm, password: e.target.value})}
-                onKeyPress={e => e.key==='Enter' && handleLogin()}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
-              <button onClick={handleLogin} disabled={authLoading}
-                className="w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 font-semibold disabled:opacity-60">
-                {authLoading ? 'Verificando...' : 'Ingresar'}
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <input type="text" placeholder="Nombre de usuario" value={registerForm.username}
-                onChange={e => setRegisterForm({...registerForm, username: e.target.value})}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
-              <input type="password" placeholder="Contraseña (mínimo 4 caracteres)" value={registerForm.password}
-                onChange={e => setRegisterForm({...registerForm, password: e.target.value})}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
-              <input type="password" placeholder="Confirmar contraseña" value={registerForm.confirm}
-                onChange={e => setRegisterForm({...registerForm, confirm: e.target.value})}
-                onKeyPress={e => e.key==='Enter' && handleRegister()}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
-              <button onClick={handleRegister} disabled={authLoading}
-                className="w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 font-semibold disabled:opacity-60">
-                {authLoading ? 'Creando cuenta...' : 'Crear Cuenta'}
-              </button>
-            </div>
-          )}
+          <div className="space-y-4">
+            <input type="text" placeholder="Usuario" value={loginForm.username}
+              onChange={e => setLoginForm({...loginForm, username: e.target.value})}
+              onKeyPress={e => e.key==='Enter' && handleLogin()}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+            <input type="password" placeholder="Contraseña" value={loginForm.password}
+              onChange={e => setLoginForm({...loginForm, password: e.target.value})}
+              onKeyPress={e => e.key==='Enter' && handleLogin()}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" />
+            <button onClick={handleLogin} disabled={authLoading}
+              className="w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 font-semibold disabled:opacity-60">
+              {authLoading ? 'Verificando...' : 'Ingresar'}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -620,7 +581,7 @@ const ExpenseTrackerApp = () => {
                 <table className="w-full">
                   <thead className="bg-gray-100">
                     <tr>
-                      {['Estado','Servicio','Categoría','Precio','C. Quincenal','C. Mensual','C. Anual','Fecha Renov.','Próx. Renov.','Días','Acciones'].map(h => (
+                      {['Estado','Servicio','Categoría','Precio','C. Quincenal','C. Mensual','C. Anual','Fecha Renov.','Últ. Refresco','Próx. Renov.','Días','Acciones'].map(h => (
                         <th key={h} className="px-3 py-2 text-left text-xs font-semibold">{h}</th>
                       ))}
                     </tr>
@@ -630,9 +591,14 @@ const ExpenseTrackerApp = () => {
                       <tr key={e.id} className={`border-b transition-colors ${e.activo ? 'hover:bg-gray-50' : 'bg-gray-50 opacity-60'}`}>
                         {/* Estado activo/inactivo */}
                         <td className="px-3 py-3">
-                          <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${e.activo ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-500'}`}>
-                            {e.activo ? 'Activo' : 'Inactivo'}
-                          </span>
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-semibold w-fit ${e.activo ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-500'}`}>
+                              {e.activo ? 'Activo' : 'Inactivo'}
+                            </span>
+                            {!e.activo && e.fechaDesactivacion && (
+                              <span className="text-xs text-gray-400">desde {formatDateCol(e.fechaDesactivacion)}</span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-3 py-3 font-medium">{e.servicio}</td>
                         <td className="px-3 py-3">{e.categoria}</td>
@@ -641,6 +607,11 @@ const ExpenseTrackerApp = () => {
                         <td className="px-3 py-3 font-semibold">{formatCurrency(e.costoMensual)}</td>
                         <td className="px-3 py-3">{formatCurrency(e.costoAnual)}</td>
                         <td className="px-3 py-3 text-sm">{formatDateCol(e.fechaRenovacion)}</td>
+                        <td className="px-3 py-3 text-sm">
+                          {e.ultimoRefresco
+                            ? <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-medium">{formatDateCol(e.ultimoRefresco)}</span>
+                            : <span className="text-gray-300 text-xs">—</span>}
+                        </td>
                         <td className="px-3 py-3 text-sm">{formatDateCol(e.proximaRenovacion)}</td>
                         <td className="px-3 py-3">
                           <span className={`px-2 py-1 rounded-full text-xs font-semibold ${e.diasRestantes < 7 ? 'bg-red-100 text-red-700' : e.diasRestantes < 15 ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>
