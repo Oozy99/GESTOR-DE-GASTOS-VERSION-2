@@ -92,8 +92,10 @@ const ExpenseTrackerApp = () => {
 
   const [filterMonth, setFilterMonth] = useState('todos');
   const [filterYear, setFilterYear] = useState('todos');
+  const [filterTipo, setFilterTipo] = useState('todos'); // 'todos' | 'fijo' | 'manual'
   const [editingFixed, setEditingFixed] = useState(null);
   const [editingGeneral, setEditingGeneral] = useState(null);
+  const [editingRefresco, setEditingRefresco] = useState(null); // { id, fecha }
   const [loading, setLoading] = useState(false);
 
   const MONTHS = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
@@ -219,22 +221,130 @@ const ExpenseTrackerApp = () => {
   };
 
   // ─── NUEVO: Renovar fecha de un gasto fijo ───────────────────────────────
-  const renewFixedExpense = async (expense) => {
-    const hoy = todayCol();
-    const nuevaProxima = nextRenewal(hoy, expense.frecuencia);
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RENOVAR GASTO FIJO — lógica transversal completa
+  //
+  // Flujo:
+  // 1. Actualiza gastos_fijos con la fecha real del pago (hoy o fecha manual)
+  // 2. Determina a qué período de sueldo pertenece esa fecha de pago
+  // 3. Elimina cualquier [Fijo] duplicado de este servicio en otros períodos
+  // 4. Si ya existe un [Fijo] en el período correcto → lo actualiza
+  //    Si no existe → lo crea en gastos_generales con la fecha del sueldo
+  // ─────────────────────────────────────────────────────────────────────────────
+  const renewFixedExpense = async (expense, fechaManual = null) => {
+    const fechaPago = fechaManual || todayCol();
+    const nuevaProxima = nextRenewal(fechaPago, expense.frecuencia);
     const nuevosDias = daysRemainingCol(nuevaProxima);
-    const payload = {
-      fecha_renovacion: hoy,
+
+    // 1. Actualizar gastos_fijos
+    const { data } = await supabase.from('gastos_fijos').update({
+      fecha_renovacion: fechaPago,
       proxima_renovacion: nuevaProxima,
       dias_restantes: nuevosDias,
-      ultimo_refresco: hoy,
-    };
-    const { data } = await supabase.from('gastos_fijos').update(payload).eq('id', expense.id).select().single();
+      ultimo_refresco: fechaPago,
+    }).eq('id', expense.id).select().single();
+
     if (data) {
-      setFixedExpenses(prev => prev.map(e => e.id === data.id ? mapFixed(data) : e)
-        .sort((a,b) => parseColDate(a.fechaRenovacion) - parseColDate(b.fechaRenovacion)));
+      setFixedExpenses(prev =>
+        prev.map(e => e.id === data.id ? mapFixed(data) : e)
+          .sort((a,b) => parseColDate(a.fechaRenovacion) - parseColDate(b.fechaRenovacion))
+      );
+
+      const descripcionFijo = `[Fijo] ${expense.servicio}`;
+      const fechaPagoDate = parseColDate(fechaPago);
+
+      // 2. Encontrar a qué período de sueldo pertenece la fecha del pago real
+      const sueldoDestino = salaries.find(s => {
+        const ini = parseColDate(s.fechaPago);
+        const fin = parseColDate(s.fechaPago);
+        if (s.frecuencia === 'quincenal') fin.setUTCDate(fin.getUTCDate() + 15);
+        else fin.setUTCMonth(fin.getUTCMonth() + 1);
+        return fechaPagoDate >= ini && fechaPagoDate <= fin;
+      });
+
+      // 3. Buscar todos los [Fijo] existentes de este servicio
+      const { data: existentesFijo } = await supabase
+        .from('gastos_generales')
+        .select('id, fecha')
+        .eq('usuario_id', currentUser.id)
+        .eq('descripcion', descripcionFijo);
+
+      const existentes = existentesFijo || [];
+
+      if (sueldoDestino) {
+        const iniDestino = parseColDate(sueldoDestino.fechaPago);
+        const finDestino = parseColDate(sueldoDestino.fechaPago);
+        if (sueldoDestino.frecuencia === 'quincenal') finDestino.setUTCDate(finDestino.getUTCDate() + 15);
+        else finDestino.setUTCMonth(finDestino.getUTCMonth() + 1);
+
+        // Separar: los que están en el período correcto vs los que están fuera
+        const enPeriodoCorrecto = existentes.filter(e => {
+          const d = parseColDate(e.fecha);
+          return d >= iniDestino && d <= finDestino;
+        });
+        const fueraDePeriodo = existentes.filter(e => {
+          const d = parseColDate(e.fecha);
+          return !(d >= iniDestino && d <= finDestino);
+        });
+
+        // Eliminar todos los que están fuera del período correcto (duplicados históricos)
+        if (fueraDePeriodo.length > 0) {
+          const ids = fueraDePeriodo.map(e => e.id);
+          await supabase.from('gastos_generales').delete().in('id', ids);
+          setGeneralExpenses(prev => prev.filter(e => !ids.includes(e.id)));
+        }
+
+        if (enPeriodoCorrecto.length > 1) {
+          // Más de uno en el período correcto → conservar el más reciente, eliminar resto
+          const [conservar, ...eliminar] = enPeriodoCorrecto.sort((a,b) =>
+            parseColDate(b.fecha) - parseColDate(a.fecha)
+          );
+          const idsEliminar = eliminar.map(e => e.id);
+          await supabase.from('gastos_generales').delete().in('id', idsEliminar);
+          setGeneralExpenses(prev => prev.filter(e => !idsEliminar.includes(e.id)));
+        } else if (enPeriodoCorrecto.length === 0) {
+          // No existe en el período correcto → crear
+          const nuevo = {
+            usuario_id: currentUser.id,
+            descripcion: descripcionFijo,
+            precio: expense.precio,
+            mes: monthNameFromDate(sueldoDestino.fechaPago),
+            fecha: sueldoDestino.fechaPago,
+            año: yearFromDate(sueldoDestino.fechaPago),
+          };
+          const { data: insertado } = await supabase
+            .from('gastos_generales').insert(nuevo).select().single();
+          if (insertado) {
+            setGeneralExpenses(prev =>
+              [...prev, mapGeneral(insertado)]
+                .sort((a,b) => parseColDate(a.fecha) - parseColDate(b.fecha))
+            );
+          }
+        }
+        // Si enPeriodoCorrecto.length === 1 → ya está correcto, no hacer nada
+
+      } else {
+        // No hay sueldo que cubra esa fecha → eliminar todos los [Fijo] sueltos
+        // (el gasto quedará pendiente hasta que se registre el sueldo correspondiente)
+        if (existentes.length > 0) {
+          const ids = existentes.map(e => e.id);
+          await supabase.from('gastos_generales').delete().in('id', ids);
+          setGeneralExpenses(prev => prev.filter(e => !ids.includes(e.id)));
+        }
+      }
     }
   };
+
+  // Guardar edición manual de ultimo_refresco con lógica transversal completa
+  const saveRefrescoEdit = async () => {
+    if (!editingRefresco) return;
+    const expense = fixedExpenses.find(e => e.id === editingRefresco.id);
+    if (!expense || !editingRefresco.fecha) return;
+    await renewFixedExpense(expense, editingRefresco.fecha);
+    setEditingRefresco(null);
+  };
+
+
 
   // ─── NUEVO: Activar/Desactivar gasto fijo ────────────────────────────────
   const toggleFixedExpense = async (expense) => {
@@ -352,14 +462,17 @@ const ExpenseTrackerApp = () => {
       else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
       const endStr = endDate.toISOString().split('T')[0];
 
-      // 3. Verificar duplicados ya existentes en ese período
+      // 3. Verificar duplicados: buscar [Fijo] de cualquier servicio ya en este período
+      //    Se compara solo por descripción (no por fecha exacta) para cubrir pagos
+      //    adelantados que ya fueron registrados con otra fecha dentro del período
       const { data: existentes } = await supabase
         .from('gastos_generales')
-        .select('descripcion, fecha')
+        .select('descripcion')
         .eq('usuario_id', currentUser.id)
+        .like('descripcion', '[Fijo]%')
         .gte('fecha', salary.fechaPago)
         .lte('fecha', endStr);
-      const claveExistente = new Set((existentes || []).map(e => `${e.descripcion}__${e.fecha}`));
+      const serviciosRegistrados = new Set((existentes || []).map(e => e.descripcion));
 
       // 4. ─── REGLA CLAVE ───────────────────────────────────────────────────
       //    Solo se auto-asigna un gasto fijo si fue RENOVADO (ultimo_refresco)
@@ -387,7 +500,7 @@ const ExpenseTrackerApp = () => {
         return false;
       });
 
-      // 5. Insertar solo los que no existan ya
+      // 5. Insertar solo los servicios que no estén ya registrados en este período
       const nuevosGastos = gastosFijosAplicables
         .map(gf => ({
           usuario_id: currentUser.id,
@@ -397,7 +510,7 @@ const ExpenseTrackerApp = () => {
           fecha: salary.fechaPago,
           año: yearFromDate(salary.fechaPago),
         }))
-        .filter(g => !claveExistente.has(`${g.descripcion}__${g.fecha}`));
+        .filter(g => !serviciosRegistrados.has(g.descripcion));
 
       if (nuevosGastos.length > 0) {
         const { data: insertados } = await supabase
@@ -442,7 +555,9 @@ const ExpenseTrackerApp = () => {
 
   const getFilteredGeneralExpenses = () => generalExpenses.filter(e => {
     const year = yearFromDate(e.fecha).toString();
-    return (filterMonth === 'todos' || e.mes === filterMonth) && (filterYear === 'todos' || year === filterYear);
+    const esFijo = e.descripcion.startsWith('[Fijo]');
+    const pasaTipo = filterTipo === 'todos' || (filterTipo === 'fijo' && esFijo) || (filterTipo === 'manual' && !esFijo);
+    return (filterMonth === 'todos' || e.mes === filterMonth) && (filterYear === 'todos' || year === filterYear) && pasaTipo;
   });
 
   const getAvailableYears = () => {
@@ -491,10 +606,23 @@ const ExpenseTrackerApp = () => {
     const endDate = parseColDate(salaryDate);
     if (frequency === 'quincenal') endDate.setUTCDate(endDate.getUTCDate() + 15);
     else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+    // Excluir los que ya fueron pagados (tienen [Fijo] en gastos_generales en este período)
+    const yaPageados = new Set(
+      generalExpenses
+        .filter(e => {
+          if (!e.descripcion.startsWith('[Fijo]')) return false;
+          const d = parseColDate(e.fecha);
+          return d >= startDate && d <= endDate;
+        })
+        .map(e => e.descripcion.replace('[Fijo] ', ''))
+    );
     let total = 0; const details = [];
     fixedExpenses.filter(e => e.activo).forEach(e => {
       const d = parseColDate(e.fechaRenovacion);
-      if (d >= startDate && d <= endDate) { total += e.precio; details.push({ servicio: e.servicio, monto: e.precio, fecha: e.fechaRenovacion }); }
+      if (d >= startDate && d <= endDate && !yaPageados.has(e.servicio)) {
+        total += e.precio;
+        details.push({ servicio: e.servicio, monto: e.precio, fecha: e.fechaRenovacion });
+      }
     });
     return { total, details };
   };
@@ -698,9 +826,30 @@ const ExpenseTrackerApp = () => {
                         <td className="px-3 py-3">{formatCurrency(e.costoAnual)}</td>
                         <td className="px-3 py-3 text-sm">{formatDateCol(e.fechaRenovacion)}</td>
                         <td className="px-3 py-3 text-sm">
-                          {e.ultimoRefresco
-                            ? <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-medium">{formatDateCol(e.ultimoRefresco)}</span>
-                            : <span className="text-gray-300 text-xs">—</span>}
+                          {editingRefresco?.id === e.id ? (
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="date"
+                                value={editingRefresco.fecha}
+                                onChange={ev => setEditingRefresco({ ...editingRefresco, fecha: ev.target.value })}
+                                className="text-xs border border-blue-300 rounded px-1 py-0.5 w-30 focus:ring-1 focus:ring-blue-400"
+                              />
+                              <button onClick={saveRefrescoEdit} title="Guardar" className="text-green-600 hover:text-green-800 font-bold px-1">✓</button>
+                              <button onClick={() => setEditingRefresco(null)} title="Cancelar" className="text-gray-400 hover:text-gray-600 px-1">✕</button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1 group/ref">
+                              {e.ultimoRefresco
+                                ? <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-medium">{formatDateCol(e.ultimoRefresco)}</span>
+                                : <span className="text-gray-300 text-xs">—</span>}
+                              <button
+                                onClick={() => setEditingRefresco({ id: e.id, fecha: e.ultimoRefresco || todayCol() })}
+                                title="Editar fecha de último refresco"
+                                className="opacity-0 group-hover/ref:opacity-100 transition-opacity text-blue-400 hover:text-blue-600 p-0.5">
+                                <Edit2 className="w-3 h-3"/>
+                              </button>
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-3 text-sm">{formatDateCol(e.proximaRenovacion)}</td>
                         <td className="px-3 py-3">
@@ -784,7 +933,7 @@ const ExpenseTrackerApp = () => {
 
             <div className="bg-white rounded-xl shadow-md p-6">
               <h2 className="text-2xl font-bold text-gray-800 mb-4">Gastos Generales Registrados</h2>
-              <div className="mb-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="mb-4 grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Filtrar por Mes</label>
                   <select value={filterMonth} onChange={e => setFilterMonth(e.target.value)}
@@ -799,6 +948,15 @@ const ExpenseTrackerApp = () => {
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                     <option value="todos">Todos los años</option>
                     {getAvailableYears().map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Filtrar por Tipo</label>
+                  <select value={filterTipo} onChange={e => setFilterTipo(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    <option value="todos">Todos</option>
+                    <option value="fijo">Solo Fijos Auto-asignados</option>
+                    <option value="manual">Solo Manuales</option>
                   </select>
                 </div>
                 <div className="flex items-end">
