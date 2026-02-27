@@ -332,14 +332,85 @@ const ExpenseTrackerApp = () => {
 
   const addSalary = async () => {
     if (!salary.monto || !salary.fechaPago) return;
+
+    // 1. Guardar el sueldo
     const { data } = await supabase.from('sueldos').insert({
       usuario_id: currentUser.id,
       monto: parseFloat(salary.monto),
       frecuencia: salary.frecuencia,
       fecha_pago: salary.fechaPago,
     }).select().single();
-    if (data) setSalaries(prev => [mapSalary(data), ...prev]
-      .sort((a,b) => parseColDate(b.fechaPago) - parseColDate(a.fechaPago)));
+
+    if (data) {
+      setSalaries(prev => [mapSalary(data), ...prev]
+        .sort((a,b) => parseColDate(b.fechaPago) - parseColDate(a.fechaPago)));
+
+      // 2. Rango del período según frecuencia del sueldo
+      const startDate = parseColDate(salary.fechaPago);
+      const endDate   = parseColDate(salary.fechaPago);
+      if (salary.frecuencia === 'quincenal') endDate.setUTCDate(endDate.getUTCDate() + 15);
+      else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+      const endStr = endDate.toISOString().split('T')[0];
+
+      // 3. Verificar duplicados ya existentes en ese período
+      const { data: existentes } = await supabase
+        .from('gastos_generales')
+        .select('descripcion, fecha')
+        .eq('usuario_id', currentUser.id)
+        .gte('fecha', salary.fechaPago)
+        .lte('fecha', endStr);
+      const claveExistente = new Set((existentes || []).map(e => `${e.descripcion}__${e.fecha}`));
+
+      // 4. ─── REGLA CLAVE ───────────────────────────────────────────────────
+      //    Solo se auto-asigna un gasto fijo si fue RENOVADO (ultimo_refresco)
+      //    dentro del período del sueldo. Sin renovación = el usuario no pagó
+      //    ese gasto en este período, por lo tanto NO se registra.
+      // ────────────────────────────────────────────────────────────────────
+      const gastosFijosAplicables = fixedExpenses.filter(gf => {
+        if (!gf.activo) return false;
+
+        // Sin renovación registrada → no aplica
+        if (!gf.ultimoRefresco) return false;
+
+        // El ultimo_refresco debe caer dentro del período del sueldo
+        const fechaRefresco = parseColDate(gf.ultimoRefresco);
+        if (fechaRefresco < startDate || fechaRefresco > endDate) return false;
+
+        // Regla de frecuencia:
+        // Quincenal → aplica a cualquier sueldo
+        // Mensual   → aplica a sueldo mensual, o solo primera quincena si el sueldo es quincenal
+        if (gf.frecuencia === 'quincenal') return true;
+        if (gf.frecuencia === 'mensual' && salary.frecuencia === 'mensual') return true;
+        if (gf.frecuencia === 'mensual' && salary.frecuencia === 'quincenal') {
+          return startDate.getUTCDate() <= 15;
+        }
+        return false;
+      });
+
+      // 5. Insertar solo los que no existan ya
+      const nuevosGastos = gastosFijosAplicables
+        .map(gf => ({
+          usuario_id: currentUser.id,
+          descripcion: `[Fijo] ${gf.servicio}`,
+          precio: gf.precio,
+          mes: monthNameFromDate(salary.fechaPago),
+          fecha: salary.fechaPago,
+          año: yearFromDate(salary.fechaPago),
+        }))
+        .filter(g => !claveExistente.has(`${g.descripcion}__${g.fecha}`));
+
+      if (nuevosGastos.length > 0) {
+        const { data: insertados } = await supabase
+          .from('gastos_generales').insert(nuevosGastos).select();
+        if (insertados) {
+          setGeneralExpenses(prev =>
+            [...prev, ...insertados.map(mapGeneral)]
+              .sort((a,b) => parseColDate(a.fecha) - parseColDate(b.fecha))
+          );
+        }
+      }
+    }
+
     setSalary({ monto:'', frecuencia:'mensual', fechaPago: todayCol() });
   };
 
@@ -414,6 +485,7 @@ const ExpenseTrackerApp = () => {
     });
   };
 
+  // Gastos fijos del catálogo con fecha de renovación en el período (referencial / pendientes)
   const calculateFixedExpensesForPeriod = (salaryDate, frequency) => {
     const startDate = parseColDate(salaryDate);
     const endDate = parseColDate(salaryDate);
@@ -427,13 +499,31 @@ const ExpenseTrackerApp = () => {
     return { total, details };
   };
 
+  // Gastos fijos que SÍ fueron renovados (pagados) — registrados con prefijo [Fijo]
+  const calculateAutoFixedForPeriod = (salaryDate, frequency) => {
+    const startDate = parseColDate(salaryDate);
+    const endDate = parseColDate(salaryDate);
+    if (frequency === 'quincenal') endDate.setUTCDate(endDate.getUTCDate() + 15);
+    else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+    let total = 0; const details = [];
+    generalExpenses.filter(e => e.descripcion.startsWith('[Fijo]')).forEach(e => {
+      const d = parseColDate(e.fecha);
+      if (d >= startDate && d <= endDate) {
+        total += e.precio;
+        details.push({ descripcion: e.descripcion.replace('[Fijo] ', ''), monto: e.precio, fecha: e.fecha });
+      }
+    });
+    return { total, details };
+  };
+
+  // Solo gastos manuales del usuario (excluye los auto-asignados)
   const calculateGeneralExpensesForPeriod = (salaryDate, frequency) => {
     const startDate = parseColDate(salaryDate);
     const endDate = parseColDate(salaryDate);
     if (frequency === 'quincenal') endDate.setUTCDate(endDate.getUTCDate() + 15);
     else endDate.setUTCMonth(endDate.getUTCMonth() + 1);
     let total = 0; const details = [];
-    generalExpenses.forEach(e => {
+    generalExpenses.filter(e => !e.descripcion.startsWith('[Fijo]')).forEach(e => {
       const d = parseColDate(e.fecha);
       if (d >= startDate && d <= endDate) { total += e.precio; details.push({ descripcion: e.descripcion, monto: e.precio, fecha: e.fecha }); }
     });
@@ -967,9 +1057,11 @@ const ExpenseTrackerApp = () => {
             {salaries.length > 0 ? (
               <div className="space-y-4">
                 {salaries.map((s, index) => {
-                  const fixedData = calculateFixedExpensesForPeriod(s.fechaPago, s.frecuencia);
-                  const generalData = calculateGeneralExpensesForPeriod(s.fechaPago, s.frecuencia);
-                  const totalGastos = fixedData.total + generalData.total;
+                  const fixedData   = calculateFixedExpensesForPeriod(s.fechaPago, s.frecuencia);   // pendientes (sin renovar)
+                  const autoData    = calculateAutoFixedForPeriod(s.fechaPago, s.frecuencia);        // renovados (pagados)
+                  const generalData = calculateGeneralExpensesForPeriod(s.fechaPago, s.frecuencia);  // manuales
+                  // Total real = solo los fijos QUE SE PAGARON (renovados) + manuales
+                  const totalGastos = autoData.total + generalData.total;
                   const saldo = s.monto - totalGastos;
                   const pct = s.monto > 0 ? (totalGastos / s.monto) * 100 : 0;
 
@@ -985,26 +1077,30 @@ const ExpenseTrackerApp = () => {
                             <h3 className="text-xl font-bold text-gray-800">Sueldo {s.frecuencia}</h3>
                             {index===0 && <span className="bg-indigo-100 text-indigo-700 text-xs font-semibold px-2 py-0.5 rounded-full">Más Reciente</span>}
                           </div>
-                          <p className="text-sm text-gray-500">
-                            {formatDateCol(s.fechaPago)}
-                          </p>
-                          <p className="text-xs text-gray-400">
-                            Período: {formatDateCol(s.fechaPago)} → {formatDateCol(endDate.toISOString().split('T')[0])}
-                          </p>
+                          <p className="text-sm text-gray-500">{formatDateCol(s.fechaPago)}</p>
+                          <p className="text-xs text-gray-400">Período: {formatDateCol(s.fechaPago)} → {formatDateCol(endDate.toISOString().split('T')[0])}</p>
                         </div>
                         <button onClick={() => deleteSalary(s.id)} className="text-red-500 hover:text-red-700 p-2 rounded-lg hover:bg-red-50"><Trash2 className="w-5 h-5"/></button>
                       </div>
 
-                      {/* Tarjetas resumen */}
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                        <div className="bg-blue-50 p-3 rounded-lg"><p className="text-xs text-gray-500">Sueldo</p><p className="text-xl font-bold text-blue-600">{formatCurrency(s.monto)}</p></div>
+                      {/* Tarjetas resumen — 5 bloques */}
+                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+                        <div className="bg-blue-50 p-3 rounded-lg">
+                          <p className="text-xs text-gray-500">Sueldo</p>
+                          <p className="text-xl font-bold text-blue-600">{formatCurrency(s.monto)}</p>
+                        </div>
                         <div className="bg-red-50 p-3 rounded-lg">
-                          <p className="text-xs text-gray-500">Gastos Fijos</p>
-                          <p className="text-xl font-bold text-red-600">{formatCurrency(fixedData.total)}</p>
-                          <p className="text-xs text-gray-400">{((fixedData.total/s.monto)*100).toFixed(1)}%</p>
+                          <p className="text-xs text-gray-500">Fijos Pagados</p>
+                          <p className="text-xl font-bold text-red-600">{formatCurrency(autoData.total)}</p>
+                          <p className="text-xs text-gray-400">{autoData.details.length} renovados</p>
+                        </div>
+                        <div className="bg-gray-50 p-3 rounded-lg border border-dashed border-gray-300">
+                          <p className="text-xs text-gray-400">Fijos Sin Pagar</p>
+                          <p className="text-xl font-bold text-gray-400">{formatCurrency(fixedData.total)}</p>
+                          <p className="text-xs text-gray-400">{fixedData.details.length} pendientes</p>
                         </div>
                         <div className="bg-orange-50 p-3 rounded-lg">
-                          <p className="text-xs text-gray-500">Gastos Generales</p>
+                          <p className="text-xs text-gray-500">Gastos Manuales</p>
                           <p className="text-xl font-bold text-orange-600">{formatCurrency(generalData.total)}</p>
                           <p className="text-xs text-gray-400">{((generalData.total/s.monto)*100).toFixed(1)}%</p>
                         </div>
@@ -1036,16 +1132,16 @@ const ExpenseTrackerApp = () => {
                           <div className="space-y-3">
                             <div>
                               <div className="flex justify-between text-sm mb-1">
-                                <span className="text-gray-600">Gastos Fijos</span>
-                                <span className="font-semibold">{formatCurrency(fixedData.total)} <span className="text-xs text-gray-400">({((fixedData.total/s.monto)*100).toFixed(1)}%)</span></span>
+                                <span className="text-gray-600">Fijos Pagados (renovados)</span>
+                                <span className="font-semibold">{formatCurrency(autoData.total)} <span className="text-xs text-gray-400">({((autoData.total/s.monto)*100).toFixed(1)}%)</span></span>
                               </div>
                               <div className="w-full bg-gray-200 rounded-full h-4">
-                                <div className="bg-red-500 h-4 rounded-full transition-all" style={{width:`${Math.min((fixedData.total/s.monto)*100,100)}%`}}></div>
+                                <div className="bg-red-500 h-4 rounded-full transition-all" style={{width:`${Math.min((autoData.total/s.monto)*100,100)}%`}}></div>
                               </div>
                             </div>
                             <div>
                               <div className="flex justify-between text-sm mb-1">
-                                <span className="text-gray-600">Gastos Generales</span>
+                                <span className="text-gray-600">Gastos Manuales</span>
                                 <span className="font-semibold">{formatCurrency(generalData.total)} <span className="text-xs text-gray-400">({((generalData.total/s.monto)*100).toFixed(1)}%)</span></span>
                               </div>
                               <div className="w-full bg-gray-200 rounded-full h-4">
@@ -1099,55 +1195,80 @@ const ExpenseTrackerApp = () => {
                         </div>
                       </div>
 
-                      {/* Detalles expandibles del período */}
+                      {/* Detalles expandibles — 3 columnas */}
                       <details className="group">
                         <summary className="cursor-pointer bg-gray-50 hover:bg-gray-100 p-4 rounded-lg font-semibold text-gray-700 transition-colors flex justify-between items-center">
                           <span>📋 Ver Detalles de Gastos del Período</span>
                           <span className="text-gray-400 group-open:rotate-180 transition-transform">▼</span>
                         </summary>
-                        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
-                          {fixedData.details.length > 0 ? (
-                            <div>
-                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                                <Calendar className="w-5 h-5 text-red-500"/>Gastos Fijos ({fixedData.details.length})
-                              </h4>
-                              <div className="bg-red-50 rounded-lg p-4 space-y-2 max-h-64 overflow-y-auto">
-                                {fixedData.details.map((detail, idx) => (
+                        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+
+                          {/* Col 1: Fijos renovados = pagados */}
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                              <RefreshCw className="w-4 h-4 text-red-500"/>Fijos Pagados ({autoData.details.length})
+                            </h4>
+                            {autoData.details.length > 0 ? (
+                              <div className="bg-red-50 rounded-lg p-3 space-y-2 max-h-56 overflow-y-auto">
+                                {autoData.details.map((d, idx) => (
                                   <div key={idx} className="flex justify-between items-start text-sm bg-white p-2 rounded">
                                     <div className="flex-1">
-                                      <p className="font-medium text-gray-700">{detail.servicio}</p>
-                                      <p className="text-xs text-gray-500">{formatDateCol(detail.fecha)}</p>
+                                      <p className="font-medium text-gray-700">{d.descripcion}</p>
+                                      <p className="text-xs text-gray-400">{formatDateCol(d.fecha)}</p>
                                     </div>
-                                    <span className="font-semibold text-red-600">{formatCurrency(detail.monto)}</span>
+                                    <span className="font-semibold text-red-600 ml-2">{formatCurrency(d.monto)}</span>
                                   </div>
                                 ))}
                                 <div className="flex justify-between text-sm font-bold bg-white p-2 rounded border-t-2 border-red-200">
                                   <span className="text-gray-700">Subtotal:</span>
-                                  <span className="text-red-600">{formatCurrency(fixedData.total)}</span>
+                                  <span className="text-red-600">{formatCurrency(autoData.total)}</span>
                                 </div>
                               </div>
-                            </div>
-                          ) : (
-                            <div>
-                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                                <Calendar className="w-5 h-5 text-red-500"/>Gastos Fijos
-                              </h4>
-                              <div className="bg-gray-50 rounded-lg p-4 text-center text-gray-500 text-sm">Sin gastos fijos en este período</div>
-                            </div>
-                          )}
-                          {generalData.details.length > 0 ? (
-                            <div>
-                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                                <DollarSign className="w-5 h-5 text-orange-500"/>Gastos Generales ({generalData.details.length})
-                              </h4>
-                              <div className="bg-orange-50 rounded-lg p-4 space-y-2 max-h-64 overflow-y-auto">
-                                {generalData.details.map((detail, idx) => (
+                            ) : (
+                              <div className="bg-gray-50 rounded-lg p-3 text-center text-gray-400 text-sm">Ningún fijo renovado en este período</div>
+                            )}
+                          </div>
+
+                          {/* Col 2: Fijos sin renovar = pendientes, no afectan el total */}
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                              <Calendar className="w-4 h-4 text-gray-400"/>Fijos Sin Pagar ({fixedData.details.length})
+                            </h4>
+                            {fixedData.details.length > 0 ? (
+                              <div className="bg-gray-50 rounded-lg p-3 space-y-2 max-h-56 overflow-y-auto border border-dashed border-gray-300">
+                                {fixedData.details.map((d, idx) => (
                                   <div key={idx} className="flex justify-between items-start text-sm bg-white p-2 rounded">
                                     <div className="flex-1">
-                                      <p className="font-medium text-gray-700">{detail.descripcion}</p>
-                                      <p className="text-xs text-gray-500">{formatDateCol(detail.fecha)}</p>
+                                      <p className="font-medium text-gray-400">{d.servicio}</p>
+                                      <p className="text-xs text-gray-400">{formatDateCol(d.fecha)}</p>
                                     </div>
-                                    <span className="font-semibold text-orange-600">{formatCurrency(detail.monto)}</span>
+                                    <span className="font-semibold text-gray-400 ml-2">{formatCurrency(d.monto)}</span>
+                                  </div>
+                                ))}
+                                <div className="flex justify-between text-sm font-bold bg-white p-2 rounded border-t-2 border-gray-200">
+                                  <span className="text-gray-500">Subtotal:</span>
+                                  <span className="text-gray-400">{formatCurrency(fixedData.total)}</span>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="bg-gray-50 rounded-lg p-3 text-center text-gray-400 text-sm">Sin fijos pendientes</div>
+                            )}
+                          </div>
+
+                          {/* Col 3: Gastos manuales */}
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                              <DollarSign className="w-4 h-4 text-orange-500"/>Gastos Manuales ({generalData.details.length})
+                            </h4>
+                            {generalData.details.length > 0 ? (
+                              <div className="bg-orange-50 rounded-lg p-3 space-y-2 max-h-56 overflow-y-auto">
+                                {generalData.details.map((d, idx) => (
+                                  <div key={idx} className="flex justify-between items-start text-sm bg-white p-2 rounded">
+                                    <div className="flex-1">
+                                      <p className="font-medium text-gray-700">{d.descripcion}</p>
+                                      <p className="text-xs text-gray-400">{formatDateCol(d.fecha)}</p>
+                                    </div>
+                                    <span className="font-semibold text-orange-600 ml-2">{formatCurrency(d.monto)}</span>
                                   </div>
                                 ))}
                                 <div className="flex justify-between text-sm font-bold bg-white p-2 rounded border-t-2 border-orange-200">
@@ -1155,15 +1276,11 @@ const ExpenseTrackerApp = () => {
                                   <span className="text-orange-600">{formatCurrency(generalData.total)}</span>
                                 </div>
                               </div>
-                            </div>
-                          ) : (
-                            <div>
-                              <h4 className="text-md font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                                <DollarSign className="w-5 h-5 text-orange-500"/>Gastos Generales
-                              </h4>
-                              <div className="bg-gray-50 rounded-lg p-4 text-center text-gray-500 text-sm">Sin gastos generales en este período</div>
-                            </div>
-                          )}
+                            ) : (
+                              <div className="bg-gray-50 rounded-lg p-3 text-center text-gray-400 text-sm">Sin gastos manuales en este período</div>
+                            )}
+                          </div>
+
                         </div>
                         <div className="mt-4 bg-indigo-50 border-2 border-indigo-200 rounded-lg p-4">
                           <div className="flex justify-between items-center">
@@ -1176,11 +1293,11 @@ const ExpenseTrackerApp = () => {
                       {/* Comparación con período anterior */}
                       {index < salaries.length - 1 && (() => {
                         const prev = salaries[index + 1];
-                        const prevFixed = calculateFixedExpensesForPeriod(prev.fechaPago, prev.frecuencia);
+                        const prevAuto    = calculateAutoFixedForPeriod(prev.fechaPago, prev.frecuencia);
                         const prevGeneral = calculateGeneralExpensesForPeriod(prev.fechaPago, prev.frecuencia);
-                        const prevTotal = prevFixed.total + prevGeneral.total;
-                        const diffGastos = totalGastos - prevTotal;
-                        const diffSueldo = s.monto - prev.monto;
+                        const prevTotal   = prevAuto.total + prevGeneral.total;
+                        const diffGastos  = totalGastos - prevTotal;
+                        const diffSueldo  = s.monto - prev.monto;
                         return (
                           <div className="mt-6 pt-6 border-t border-gray-200">
                             <div className="bg-blue-50 rounded-lg p-4">
