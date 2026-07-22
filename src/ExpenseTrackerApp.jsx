@@ -637,22 +637,42 @@ const ExpenseTrackerApp = () => {
 
   const getFinancialHealth = () => {
     if (salaries.length === 0) return null;
-    const sueldo = salaries[0].monto;
-    const currentMonthName = monthNameFromDate(todayCol());
-    const currentYear = yearFromDate(todayCol());
-    const gastosGeneralesMes = generalExpenses
-      .filter(e => e.mes === currentMonthName && (e.año === currentYear || yearFromDate(e.fecha) === currentYear))
-      .reduce((sum, e) => sum + e.precio, 0);
-    const gastosFijos = getTotalFixedMensual();
-    const totalGastado = gastosFijos + gastosGeneralesMes;
-    const disponible = sueldo - totalGastado;
-    const porcentaje = sueldo > 0 ? (totalGastado / sueldo) * 100 : 0;
-    let estado, color, bgColor, emoji, barColor;
-    if (porcentaje <= 50) { estado='Excelente'; color='text-green-700'; bgColor='bg-green-50 border-green-200'; emoji='✅'; barColor='bg-green-500'; }
-    else if (porcentaje <= 70) { estado='Buena'; color='text-blue-700'; bgColor='bg-blue-50 border-blue-200'; emoji='👍'; barColor='bg-blue-500'; }
-    else if (porcentaje <= 90) { estado='Moderada'; color='text-yellow-700'; bgColor='bg-yellow-50 border-yellow-200'; emoji='⚠️'; barColor='bg-yellow-500'; }
-    else { estado='Crítica'; color='text-red-700'; bgColor='bg-red-50 border-red-200'; emoji='🚨'; barColor='bg-red-500'; }
-    return { sueldo, gastosFijos, gastosGeneralesMes, totalGastado, disponible, porcentaje, estado, color, bgColor, emoji, barColor, currentMonthName, currentYear };
+    const s = salaries[0]; // sueldo más reciente
+    const sueldo = s.monto;
+
+    // Fijos realmente pagados (renovados) en el período del sueldo más reciente
+    const autoData = calculateAutoFixedForPeriod(s.fechaPago, s.frecuencia);
+    const fijosPagados = autoData.total;
+
+    // Gastos manuales del período del sueldo más reciente
+    const generalData = calculateGeneralExpensesForPeriod(s.fechaPago, s.frecuencia);
+    const gastosVariables = generalData.total;
+
+    const totalGastado = fijosPagados + gastosVariables;
+    const libreTrasFijos = sueldo - fijosPagados;         // dinero real disponible para variables
+    const disponible = sueldo - totalGastado;             // balance final
+    const porcentajeFijos = sueldo > 0 ? (fijosPagados / sueldo) * 100 : 0;
+    const porcentajeVariables = libreTrasFijos > 0 ? (gastosVariables / libreTrasFijos) * 100 : (gastosVariables > 0 ? 999 : 0);
+    const porcentajeTotal = sueldo > 0 ? (totalGastado / sueldo) * 100 : 0;
+
+    // Estado basado en el porcentaje total del sueldo usado
+    let estado, color, bgColor, emoji;
+    if (porcentajeTotal <= 50)      { estado='Excelente'; color='text-green-700'; bgColor='bg-green-50 border-green-200'; emoji='✅'; }
+    else if (porcentajeTotal <= 70) { estado='Buena';     color='text-blue-700';  bgColor='bg-blue-50 border-blue-200';   emoji='👍'; }
+    else if (porcentajeTotal <= 90) { estado='Moderada';  color='text-yellow-700';bgColor='bg-yellow-50 border-yellow-200';emoji='⚠️'; }
+    else                            { estado='Crítica';   color='text-red-700';   bgColor='bg-red-50 border-red-200';     emoji='🚨'; }
+
+    const currentMonthName = monthNameFromDate(s.fechaPago);
+    const currentYear = yearFromDate(s.fechaPago);
+
+    return {
+      sueldo, fijosPagados, gastosVariables, totalGastado,
+      libreTrasFijos, disponible,
+      porcentajeFijos, porcentajeVariables, porcentajeTotal,
+      estado, color, bgColor, emoji,
+      currentMonthName, currentYear,
+      periodoFecha: s.fechaPago, periodoFrecuencia: s.frecuencia,
+    };
   };
 
   const getGeneralByMonthGrouped = () => {
@@ -1090,7 +1110,9 @@ const ExpenseTrackerApp = () => {
           <div className="space-y-6">
             {health ? (
               <div className={`rounded-xl shadow-md p-6 border ${health.bgColor}`}>
-                <div className="flex items-center gap-3 mb-4">
+
+                {/* Encabezado */}
+                <div className="flex items-center gap-3 mb-5">
                   <span className="text-4xl">{health.emoji}</span>
                   <div>
                     <h2 className="text-2xl font-bold text-gray-800">
@@ -1099,38 +1121,101 @@ const ExpenseTrackerApp = () => {
                     <p className={`text-lg font-semibold ${health.color}`}>Estado: {health.estado}</p>
                   </div>
                 </div>
+
+                {/* Tarjetas resumen */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                  <div className="bg-white rounded-lg p-4 shadow-sm"><p className="text-xs text-gray-500 mb-1">Sueldo</p><p className="text-xl font-bold text-blue-600">{formatCurrency(health.sueldo)}</p></div>
-                  <div className="bg-white rounded-lg p-4 shadow-sm"><p className="text-xs text-gray-500 mb-1">Gastos Fijos</p><p className="text-xl font-bold text-red-600">{formatCurrency(health.gastosFijos)}</p></div>
-                  <div className="bg-white rounded-lg p-4 shadow-sm"><p className="text-xs text-gray-500 mb-1">Gastos del Mes</p><p className="text-xl font-bold text-orange-600">{formatCurrency(health.gastosGeneralesMes)}</p></div>
                   <div className="bg-white rounded-lg p-4 shadow-sm">
-                    <p className="text-xs text-gray-500 mb-1">{health.disponible >= 0 ? 'Disponible' : 'Déficit'}</p>
-                    <p className={`text-xl font-bold ${health.disponible >= 0 ? 'text-green-600' : 'text-red-600'}`}>{formatCurrency(Math.abs(health.disponible))}</p>
+                    <p className="text-xs text-gray-500 mb-1">💰 Sueldo del período</p>
+                    <p className="text-xl font-bold text-blue-600">{formatCurrency(health.sueldo)}</p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4 shadow-sm">
+                    <p className="text-xs text-gray-500 mb-1">🔒 Fijos pagados</p>
+                    <p className="text-xl font-bold text-red-500">{formatCurrency(health.fijosPagados)}</p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4 shadow-sm">
+                    <p className="text-xs text-gray-500 mb-1">🛒 Gastos variables</p>
+                    <p className="text-xl font-bold text-orange-500">{formatCurrency(health.gastosVariables)}</p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4 shadow-sm">
+                    <p className="text-xs text-gray-500 mb-1">{health.disponible >= 0 ? '✅ Balance final' : '🚨 Déficit'}</p>
+                    <p className={`text-xl font-bold ${health.disponible >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {health.disponible < 0 && '− '}{formatCurrency(Math.abs(health.disponible))}
+                    </p>
                   </div>
                 </div>
-                <div>
-                  <div className="flex justify-between text-sm font-medium mb-2">
-                    <span className="text-gray-600">{formatCurrency(0)}</span>
-                    <span className={`font-bold ${health.color}`}>{health.porcentaje.toFixed(1)}% utilizado</span>
-                    <span className="text-gray-600">{formatCurrency(health.sueldo)}</span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-8 overflow-hidden">
-                    <div className={`h-full ${health.barColor} transition-all duration-700 flex items-center justify-end pr-3`}
-                      style={{ width: `${Math.min(health.porcentaje, 100)}%` }}>
-                      {health.porcentaje > 15 && <span className="text-white text-xs font-bold">{formatCurrency(health.totalGastado)}</span>}
+
+                {/* Desglose en cascada */}
+                <div className="bg-white rounded-xl p-5 shadow-sm mb-5">
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-4">📊 Desglose del presupuesto</p>
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                      <span className="text-sm text-gray-600">💰 Sueldo del período</span>
+                      <span className="font-bold text-blue-600">{formatCurrency(health.sueldo)}</span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                      <span className="text-sm text-gray-600">🔒 Fijos pagados (renovados)</span>
+                      <span className="font-bold text-red-500">− {formatCurrency(health.fijosPagados)}</span>
+                    </div>
+                    <div className={`flex justify-between items-center py-2 px-3 rounded-lg border-b border-gray-100 ${health.libreTrasFijos >= 0 ? 'bg-blue-50' : 'bg-red-50'}`}>
+                      <span className="text-sm font-semibold text-gray-700">📌 Libre para variables</span>
+                      <span className={`font-bold ${health.libreTrasFijos >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
+                        {health.libreTrasFijos < 0 && '− '}{formatCurrency(Math.abs(health.libreTrasFijos))}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b border-gray-100">
+                      <span className="text-sm text-gray-600">🛒 Gastos variables del período</span>
+                      <span className="font-bold text-orange-500">− {formatCurrency(health.gastosVariables)}</span>
+                    </div>
+                    <div className={`flex justify-between items-center py-3 px-3 rounded-lg font-bold text-base mt-1 ${health.disponible >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                      <span>{health.disponible >= 0 ? '✅ Balance final (sobrante)' : '🚨 Balance final (déficit)'}</span>
+                      <span>{health.disponible < 0 && '− '}{formatCurrency(Math.abs(health.disponible))}</span>
                     </div>
                   </div>
-                  <div className="flex justify-between text-xs text-gray-500 mt-1">
-                    <span>Gastado: {formatCurrency(health.totalGastado)}</span>
-                    <span>{health.disponible >= 0 ? `Disponible: ${formatCurrency(health.disponible)}` : `Déficit: ${formatCurrency(Math.abs(health.disponible))}`}</span>
-                  </div>
-                  {health.porcentaje > 100 && (
-                    <div className="mt-3 bg-red-100 border border-red-300 rounded-lg p-3 flex items-center gap-2">
-                      <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0"/>
-                      <p className="text-sm text-red-700 font-semibold">¡Presupuesto excedido en {formatCurrency(Math.abs(health.disponible))}!</p>
-                    </div>
-                  )}
                 </div>
+
+                {/* Dos barras de progreso */}
+                <div className="bg-white rounded-xl p-5 shadow-sm space-y-5">
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">📈 Uso del presupuesto</p>
+
+                  {/* Barra 1: fijos vs sueldo */}
+                  <div>
+                    <div className="flex justify-between text-xs text-gray-500 mb-1">
+                      <span>🔒 Fijos pagados sobre sueldo</span>
+                      <span className="font-semibold">{health.porcentajeFijos.toFixed(1)}% — {formatCurrency(health.fijosPagados)} de {formatCurrency(health.sueldo)}</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-5 overflow-hidden">
+                      <div className="h-full bg-red-400 rounded-full transition-all duration-700 flex items-center justify-end pr-2"
+                        style={{ width: `${Math.min(health.porcentajeFijos, 100)}%` }}>
+                        {health.porcentajeFijos > 12 && <span className="text-white text-xs font-bold">{health.porcentajeFijos.toFixed(0)}%</span>}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Barra 2: variables vs libre */}
+                  <div>
+                    <div className="flex justify-between text-xs text-gray-500 mb-1">
+                      <span>🛒 Variables sobre dinero libre</span>
+                      <span className={`font-semibold ${health.porcentajeVariables > 100 ? 'text-red-600' : 'text-gray-500'}`}>
+                        {Math.min(health.porcentajeVariables, 999).toFixed(1)}% — {formatCurrency(health.gastosVariables)} de {formatCurrency(Math.max(health.libreTrasFijos, 0))}
+                      </span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-5 overflow-hidden">
+                      <div className={`h-full rounded-full transition-all duration-700 flex items-center justify-end pr-2 ${health.porcentajeVariables > 100 ? 'bg-red-600' : 'bg-orange-400'}`}
+                        style={{ width: `${Math.min(health.porcentajeVariables, 100)}%` }}>
+                        {health.porcentajeVariables > 12 && <span className="text-white text-xs font-bold">{Math.min(health.porcentajeVariables, 999).toFixed(0)}%</span>}
+                      </div>
+                    </div>
+                    {health.porcentajeVariables > 100 && (
+                      <div className="mt-2 bg-red-100 border border-red-300 rounded-lg p-3 flex items-center gap-2">
+                        <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0"/>
+                        <p className="text-sm text-red-700 font-semibold">
+                          ¡Gastos variables exceden el dinero libre en {formatCurrency(health.gastosVariables - Math.max(health.libreTrasFijos, 0))}!
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
               </div>
             ) : (
               <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-6 text-center">

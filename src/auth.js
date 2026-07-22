@@ -7,7 +7,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const ALLOWED_USERS = [
-  'admin', 
+  'admin','jenifer', 'santiago','kevin','diego' 
   // 👉 agrega aquí más nombres permitidos, por ejemplo:
   // 'juan',
   // 'maria',
