@@ -7,10 +7,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const ALLOWED_USERS = [
-  'admin','jenifer', 'santiago','kevin','diego' 
-  // 👉 agrega aquí más nombres permitidos, por ejemplo:
-  // 'juan',
-  // 'maria',
+  'admin','jenifer', 'santiago','kevin','diego','andres','arlinton','camilo','tomas','mmilo','sarah','sara','any'
+  
 ];
 
 export const authenticate = (username) => {
